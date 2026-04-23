@@ -1,83 +1,197 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
-FastAPI application for the Codereviewagent Environment.
-
-This module creates an HTTP server that exposes the CodereviewagentEnvironment
-over HTTP and WebSocket endpoints, compatible with EnvClient.
+Async FastAPI server for the CodeReviewAgent environment.
 
 Endpoints:
-    - POST /reset: Reset the environment
-    - POST /step: Execute an action
-    - GET /state: Get current environment state
-    - GET /schema: Get action/observation schemas
-    - WS /ws: WebSocket endpoint for persistent sessions
+  POST /reset              — start a new episode (HTTP session)
+  POST /step               — execute one action
+  GET  /state              — current episode snapshot
+  GET  /health             — liveness probe
+  GET  /schema             — action / observation schema
+  WS   /ws                 — WebSocket session (own env per connection)
 
-Usage:
-    # Development (with auto-reload):
-    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
+HTTP endpoints share a single env instance (sequential use).
+WebSocket endpoints each spin up an isolated env instance, enabling
+concurrent GRPO rollouts.
 
-    # Production:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 4
-
-    # Or run directly:
-    python -m server.app
+OpenEnv web interface is mounted at /web via create_app if available;
+falls back to a minimal HTML redirect page.
 """
 
-try:
-    from openenv.core.env_server.http_server import create_app
-except Exception as e:  # pragma: no cover
-    raise ImportError(
-        "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
-    ) from e
+from __future__ import annotations
+
+import json
+from contextlib import asynccontextmanager
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 
 try:
-    from ..models import CodereviewagentAction, CodereviewagentObservation
+    from openenv.core.env_server.http_server import create_app as _create_openenv_app
+    _OPENENV_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _OPENENV_AVAILABLE = False
+
+try:
+    from ..models import CodereviewagentAction, CodereviewagentObservation, RewardType
     from .CodeReviewAgent_environment import CodereviewagentEnvironment
 except ModuleNotFoundError:
-    from models import CodereviewagentAction, CodereviewagentObservation
-    from server.CodeReviewAgent_environment import CodereviewagentEnvironment
+    from models import CodereviewagentAction, CodereviewagentObservation, RewardType  # type: ignore
+    from server.CodeReviewAgent_environment import CodereviewagentEnvironment  # type: ignore
 
 
-# Create the app with web interface and README integration
-app = create_app(
-    CodereviewagentEnvironment,
-    CodereviewagentAction,
-    CodereviewagentObservation,
-    env_name="CodeReviewAgent",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
-)
+# ── Shared HTTP session env ───────────────────────────────────────────────────
+
+_http_env: CodereviewagentEnvironment | None = None
 
 
-def main(host: str = "0.0.0.0", port: int = 8000):
-    """
-    Entry point for direct execution via uv run or python -m.
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    global _http_env
+    _http_env = CodereviewagentEnvironment()
+    yield
+    _http_env = None
 
-    This function enables running the server without Docker:
-        uv run --project . server
-        uv run --project . server --port 8001
-        python -m CodeReviewAgent.server.app
 
-    Args:
-        host: Host address to bind to (default: "0.0.0.0")
-        port: Port number to listen on (default: 8000)
+# ── Response shapes ───────────────────────────────────────────────────────────
 
-    For production deployments, consider using uvicorn directly with
-    multiple workers:
-        uvicorn CodeReviewAgent.server.app:app --workers 4
-    """
+class StepResponse:
+    def __init__(
+        self,
+        obs: CodereviewagentObservation,
+        reward: RewardType,
+        done: bool,
+        info: dict[str, Any],
+    ) -> None:
+        self.obs = obs
+        self.reward = reward
+        self.done = done
+        self.info = info
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "observation": self.obs.model_dump(),
+            "reward": self.reward.model_dump(),
+            "done": self.done,
+            "info": self.info,
+        }
+
+
+# ── App factory ───────────────────────────────────────────────────────────────
+
+def _build_app() -> FastAPI:
+    application = FastAPI(
+        title="CodeReviewAgent",
+        description="OpenEnv code-review environment — async FastAPI server.",
+        version="2.0.0",
+        lifespan=lifespan,
+    )
+
+    # ── HTTP endpoints ────────────────────────────────────────────────────
+
+    @application.post("/reset", summary="Start a new episode")
+    async def reset_endpoint() -> dict[str, Any]:
+        assert _http_env is not None
+        obs = await _http_env.async_reset()
+        return {"observation": obs.model_dump(), "reward": None, "done": False, "info": {}}
+
+    @application.post("/step", summary="Execute one action")
+    async def step_endpoint(action: CodereviewagentAction) -> dict[str, Any]:
+        assert _http_env is not None
+        obs, reward, done, info = await _http_env.async_step(action)
+        return StepResponse(obs, reward, done, info).to_dict()
+
+    @application.get("/state", summary="Current episode state snapshot")
+    async def state_endpoint() -> dict[str, Any]:
+        assert _http_env is not None
+        return await _http_env.async_state()
+
+    @application.get("/health", summary="Liveness probe")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @application.get("/schema", summary="Action and observation JSON schemas")
+    async def schema() -> dict[str, Any]:
+        return {
+            "action": CodereviewagentAction.model_json_schema(),
+            "observation": CodereviewagentObservation.model_json_schema(),
+            "reward": RewardType.model_json_schema(),
+        }
+
+    # ── WebSocket endpoint (one env per connection) ───────────────────────
+
+    @application.websocket("/ws")
+    async def ws_endpoint(websocket: WebSocket) -> None:
+        await websocket.accept()
+        env = CodereviewagentEnvironment()
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                msg = json.loads(raw)
+                cmd = msg.get("command")
+
+                if cmd == "reset":
+                    obs = await env.async_reset()
+                    await websocket.send_json(
+                        {"type": "reset", "observation": obs.model_dump()}
+                    )
+
+                elif cmd == "step":
+                    try:
+                        action = CodereviewagentAction(**msg["action"])
+                    except Exception as exc:
+                        await websocket.send_json({"type": "error", "detail": str(exc)})
+                        continue
+                    obs, reward, done, info = await env.async_step(action)
+                    await websocket.send_json(
+                        {
+                            "type": "step",
+                            "observation": obs.model_dump(),
+                            "reward": reward.model_dump(),
+                            "done": done,
+                            "info": info,
+                        }
+                    )
+
+                elif cmd == "state":
+                    state = await env.async_state()
+                    await websocket.send_json({"type": "state", "state": state})
+
+                else:
+                    await websocket.send_json(
+                        {"type": "error", "detail": f"Unknown command: {cmd}"}
+                    )
+
+        except WebSocketDisconnect:
+            pass
+
+    # ── Web UI ────────────────────────────────────────────────────────────
+
+    @application.get("/web", response_class=HTMLResponse, include_in_schema=False)
+    async def web_ui() -> str:
+        return """
+        <!doctype html><html><head><title>CodeReviewAgent</title></head>
+        <body>
+        <h2>CodeReviewAgent Environment</h2>
+        <p>API docs: <a href="/docs">/docs</a></p>
+        <p>Health: <a href="/health">/health</a></p>
+        <p>Schema: <a href="/schema">/schema</a></p>
+        </body></html>
+        """
+
+    return application
+
+
+app = _build_app()
+
+
+def main(host: str = "0.0.0.0", port: int = 8000) -> None:
     import uvicorn
-
     uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

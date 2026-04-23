@@ -1,255 +1,184 @@
 ---
-title: Codereviewagent Environment Server
-emoji: 🎺
-colorFrom: yellow
-colorTo: indigo
+title: CodeReviewAgent Environment
+emoji: 🔍
+colorFrom: blue
+colorTo: green
 sdk: docker
 pinned: false
 app_port: 8000
 base_path: /web
 tags:
   - openenv
+  - code-review
+  - rl-training
+  - grpo
 ---
 
-# Codereviewagent Environment
+# CodeReviewAgent — OpenEnv Environment
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+> **OpenEnv Hackathon 2026 · Theme #3.1 — World Modeling (Professional Tasks)**
 
-## Quick Start
+An RL training environment where an LLM learns to perform structured **pull-request code reviews** on real Python source files.  The agent must identify bugs, security vulnerabilities, performance bottlenecks, and design issues — and submit a structured review with line-level comments.
 
-The simplest way to use the Codereviewagent environment is through the `CodereviewagentEnv` class:
+---
 
-```python
-from CodeReviewAgent import CodereviewagentAction, CodereviewagentEnv
+## Problem Motivation
 
-try:
-    # Create environment from Docker image
-    CodeReviewAgentenv = CodereviewagentEnv.from_docker_image("CodeReviewAgent-env:latest")
+LLMs can already *do* code review, but they do it inconsistently: they miss critical security bugs, produce noisy false positives, and fail to categorise issues by severity.  
+This environment provides a **reward signal** that directly measures review quality, enabling GRPO-style RL to close that gap in a measurable, repeatable way.
 
-    # Reset
-    result = CodeReviewAgentenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
+---
 
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
+## Environment Design
 
-    for msg in messages:
-        result = CodeReviewAgentenv.step(CodereviewagentAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
+### Tasks (5 total)
 
-finally:
-    # Always clean up
-    CodeReviewAgentenv.close()
-```
+| ID | Difficulty | File | Issues | Domain |
+|----|-----------|------|--------|--------|
+| 0  | Easy      | `utils.py` | 3 | Logic bugs, off-by-one, dead code |
+| 1  | Medium    | `auth.py` | 5 | SQL injection, MD5, eval(), hardcoded creds |
+| 2  | Hard      | `data_pipeline.py` | 7 | N+1, SSL bypass, thread leak, OOM cache |
+| 3  | Medium    | `async_worker.py` | 5 | Race condition, missing await, resource leak |
+| 4  | Hard      | `api_server.py` | 6 | Command injection, path traversal, pickle RCE |
 
-That's it! The `CodereviewagentEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
-
-## Building the Docker Image
-
-Before using the environment, you need to build the Docker image:
-
-```bash
-# From project root
-docker build -t CodeReviewAgent-env:latest -f server/Dockerfile .
-```
-
-## Deploying to Hugging Face Spaces
-
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
-
-```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
-
-# Or specify options
-openenv push --namespace my-org --private
-```
-
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
-
-### Prerequisites
-
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
-
-### Options
-
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
-
-### Examples
-
-```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
-
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
-
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
-
-# Push as a private space
-openenv push --private
-
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
-```
-
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
-
-The deployed space includes:
-- **Web Interface** at `/web` - Interactive UI for exploring the environment
-- **API Documentation** at `/docs` - Full OpenAPI/Swagger interface
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
-
-## Environment Details
-
-### Action
-**CodereviewagentAction**: Contains a single field
-- `message` (str) - The message to echo back
+Tasks cycle automatically on each `reset()` call.
 
 ### Observation
-**CodereviewagentObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
-
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a Codereviewagent environment server running, you can connect directly:
 
 ```python
-from CodeReviewAgent import CodereviewagentEnv
-
-# Connect to existing server
-CodeReviewAgentenv = CodereviewagentEnv(base_url="<ENV_HTTP_URL_HERE>")
-
-# Use as normal
-result = CodeReviewAgentenv.reset()
-result = CodeReviewAgentenv.step(CodereviewagentAction(message="Hello!"))
+{
+  "code_snippet":     str,   # Python source to review
+  "task_description": str,   # What to look for
+  "file_name":        str,
+  "task_id":          int,   # 0–4
+  "task_difficulty":  str,   # easy / medium / hard
+  "review_history":   list,  # actions taken so far this episode
+  "step_count":       int,
+  "max_steps":        int,
+  "issues_found_count": int,
+  "total_issues":     int,
+  "done":             bool,
+  "reward":           float,
+}
 ```
 
-Note: When connecting to an existing server, `CodeReviewAgentenv.close()` will NOT stop the server.
+### Actions
 
-### Using the Context Manager
+| action_type | Required fields | Effect |
+|-------------|----------------|--------|
+| `add_comment` | `line_number`, `comment`, `severity`, `category` | Annotate a line; partial reward if it matches a ground-truth issue |
+| `request_changes` | `comment` | Signal PR needs work |
+| `approve` | — | Approve PR (penalised if issues remain) |
+| `submit_review` | — | Finalise review; terminal reward |
 
-The client supports context manager usage for automatic connection management:
+### Reward Function
+
+```
+Per-step (ADD_COMMENT):
+  + weight/total_weight × 0.60    per newly found issue (max 0.60 cumulative)
+  − 0.02                          per false-positive (substantive comment, no match)
+
+Terminal (SUBMIT_REVIEW):
+  + coverage × 0.20               weighted issue coverage bonus (max 0.20)
+  + 0.10 / −0.10                  correct / incorrect final decision
+  + efficiency × 0.10             step-efficiency bonus when coverage ≥ 60%
+
+Maximum achievable: ~1.0
+```
+
+Grading uses **keyword + line-range matching** (±3 lines tolerance) against hand-labelled ground-truth issues — no LLM judge needed, fully deterministic.
+
+---
+
+## Training
+
+### GRPO (single-turn format)
+
+For efficient LLM training the environment is also exposed in a **single-turn format**: the model receives the full code and must output a **JSON array** of all issues in one response. The same keyword-matching reward function scores the output.
 
 ```python
-from CodeReviewAgent import CodereviewagentAction, CodereviewagentEnv
+# Input prompt
+{"role": "system", "content": "You are an expert code reviewer. Output a JSON array of issues..."}
+{"role": "user",   "content": "File: auth.py\n```python\n...\n```\nProvide your review:"}
 
-# Connect with context manager (auto-connects and closes)
-with CodereviewagentEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(CodereviewagentAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
+# Expected output
+[{"line": 5, "category": "security", "severity": "critical",
+  "comment": "Hardcoded DB_PASSWORD should be loaded from environment variable"},
+ ...]
 ```
 
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
+### Files
 
-### Concurrent WebSocket Sessions
+| File | Purpose |
+|------|---------|
+| `train_grpo.py` | Standalone GRPO training script (TRL, full-precision or LoRA) |
+| `train_grpo_colab.ipynb` | Colab notebook — T4 GPU, Unsloth 4-bit, plots included |
+| `baseline.py` | GPT-4o-mini baseline for comparison |
 
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
-
-```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    CodereviewagentEnvironment,  # Pass class, not instance
-    CodereviewagentAction,
-    CodereviewagentObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
-)
-```
-
-Then multiple clients can connect simultaneously:
-
-```python
-from CodeReviewAgent import CodereviewagentAction, CodereviewagentEnv
-from concurrent.futures import ThreadPoolExecutor
-
-def run_episode(client_id: int):
-    with CodereviewagentEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(CodereviewagentAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
-
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
-
-## Development & Testing
-
-### Direct Environment Testing
-
-Test the environment logic directly without starting the HTTP server:
+### Quick Start
 
 ```bash
-# From the server directory
-python3 server/CodeReviewAgent_environment.py
+# Run baseline
+export OPENAI_API_KEY=sk-...
+python baseline.py
+
+# Run reward smoke test (no GPU needed)
+python train_grpo.py --test
+
+# Train (requires GPU + trl>=0.12)
+pip install trl datasets accelerate unsloth
+python train_grpo.py
 ```
 
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
+### Colab Training
 
-### Running Locally
+Open `train_grpo_colab.ipynb` in Google Colab (T4 runtime).  
+All install, training, evaluation, and plotting cells are included.
 
-Run the server locally for development:
+---
 
-```bash
-uvicorn server.app:app --reload
-```
+## Results
+
+*(Fill in after training run)*
+
+| Model | Avg Reward | Task-0 | Task-1 | Task-2 | Task-3 | Task-4 |
+|-------|-----------|--------|--------|--------|--------|--------|
+| GPT-4o-mini (baseline) | — | — | — | — | — | — |
+| Qwen2.5-1.5B (untrained) | — | — | — | — | — | — |
+| Qwen2.5-1.5B (GRPO 3 epochs) | — | — | — | — | — | — |
+
+Training curves: `training_curves.png` · Per-task rewards: `per_task_reward.png`
+
+---
 
 ## Project Structure
 
 ```
 CodeReviewAgent/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # CodereviewagentEnv client
-├── models.py              # Action and Observation models
+├── openenv.yaml                    # OpenEnv manifest
+├── pyproject.toml
+├── models.py                       # Action + Observation types
+├── client.py                       # OpenEnv client
 └── server/
-    ├── __init__.py        # Server module exports
-    ├── CodeReviewAgent_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
+    ├── app.py                      # FastAPI server
+    ├── CodeReviewAgent_environment.py
+    ├── grader.py                   # Deterministic reward grader
+    ├── tasks.py                    # 5 ground-truth tasks
+    └── Dockerfile
+train_grpo.py                       # GRPO training script
+train_grpo_colab.ipynb              # Colab notebook
+baseline.py                         # GPT-4o-mini baseline
 ```
+
+---
+
+## API
+
+The environment server exposes standard OpenEnv HTTP + WebSocket endpoints:
+
+- `POST /reset` — start a new episode
+- `POST /step` — execute an action
+- `GET  /state` — current episode state
+- `WS   /ws` — persistent low-latency session
+- `GET  /web` — interactive web UI
+- `GET  /docs` — Swagger / OpenAPI docs

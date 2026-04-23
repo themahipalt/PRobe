@@ -1,43 +1,44 @@
 """
-Baseline inference script for the CodeReviewAgent OpenEnv environment.
+Async LLM baseline for the CodeReviewAgent environment.
 
-Runs an OpenAI model against all 3 tasks (easy / medium / hard) and
-produces a reproducible baseline score.
+Runs an AsyncOpenAI model against all tasks and produces:
+  - Per-step JSONL log  (--output path.jsonl)
+  - Episode summary JSON (--summary path.json)
+  - Console table
 
 Usage:
     export OPENAI_API_KEY=sk-...
     python baseline.py
 
-Optional env vars:
-    OPENAI_MODEL   model name (default: gpt-4o-mini)
-    OPENAI_BASE_URL  override endpoint (e.g. Azure)
-"""
+    # Custom options
+    python baseline.py --model gpt-4o --temperature 0.3 --episodes 2 --task-id 1
 
+    # All tasks, 3 episodes each, save logs
+    python baseline.py --episodes 3 --output logs/run.jsonl --summary logs/summary.json
+"""
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import json
 import os
 import sys
-from dotenv import load_dotenv                                                                                                          
+import time
+from pathlib import Path
+
+from dotenv import load_dotenv
+
 load_dotenv()
-
-
-# Allow importing the package without installing it
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "CodeReviewAgent"))
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from CodeReviewAgent.server.CodeReviewAgent_environment import CodereviewagentEnvironment
-from CodeReviewAgent.models import (
-    ActionType,
-    CodereviewagentAction,
-    IssueCategory,
-    Severity,
-)
+from CodeReviewAgent.models import ActionType, CodereviewagentAction
 
-SYSTEM_PROMPT = """You are a senior software engineer performing a pull-request code review.
-
+SYSTEM_PROMPT = """\
+You are a senior software engineer performing a pull-request code review.
 You interact with the review environment by emitting a single JSON action per turn.
 
 Available actions:
@@ -46,10 +47,10 @@ Available actions:
    {"action_type": "add_comment", "line_number": <int>, "comment": "<text>",
     "severity": "<info|warning|error|critical>", "category": "<bug|security|performance|style|design>"}
 
-2. REQUEST_CHANGES — signal the PR needs work (use after adding all comments):
+2. REQUEST_CHANGES — signal the PR needs work (after adding all comments):
    {"action_type": "request_changes", "comment": "<brief summary>"}
 
-3. APPROVE — approve the PR (only when you find no significant issues):
+3. APPROVE — approve the PR (only when no significant issues remain):
    {"action_type": "approve"}
 
 4. SUBMIT_REVIEW — finalise and submit the review (ends the episode):
@@ -61,13 +62,14 @@ Strategy:
 - Decide REQUEST_CHANGES if issues exist, APPROVE if the code is clean.
 - Always end with SUBMIT_REVIEW.
 
-Reply with ONLY a valid JSON object — no markdown fences, no explanation."""
+Reply with ONLY a valid JSON object — no markdown fences, no explanation.\
+"""
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _parse_action(text: str) -> CodereviewagentAction:
-    """Extract JSON from the model response and parse it into an Action."""
     text = text.strip()
-    # Strip optional markdown code fences
     if text.startswith("```"):
         lines = text.splitlines()
         text = "\n".join(ln for ln in lines if not ln.startswith("```")).strip()
@@ -75,7 +77,7 @@ def _parse_action(text: str) -> CodereviewagentAction:
     return CodereviewagentAction(**data)
 
 
-def _format_prompt(obs, step: int) -> str:
+def _format_user_message(obs, step: int) -> str:
     history_lines = ""
     if obs.review_history:
         recent = obs.review_history[-6:]
@@ -83,7 +85,6 @@ def _format_prompt(obs, step: int) -> str:
             f"  [{e.get('type')}] line={e.get('line')} — {str(e.get('text', ''))[:90]}"
             for e in recent
         )
-
     return (
         f"File: {obs.file_name}  |  Task: {obs.task_difficulty.upper()}\n"
         f"Objective: {obs.task_description}\n"
@@ -94,64 +95,111 @@ def _format_prompt(obs, step: int) -> str:
     )
 
 
-def run_task(client: OpenAI, model: str, task_id: int) -> dict:
-    """Run one episode on the given task and return a result dict."""
-    # Force the environment to start on the right task
-    env = CodereviewagentEnvironment()
-    # cycle to the correct task_id (reset increments _reset_count)
-    for _ in range(task_id):
-        env.reset()
+# ── Single episode ────────────────────────────────────────────────────────────
 
-    obs = env.reset()
-    task_name = obs.task_difficulty
+async def run_episode(
+    client: AsyncOpenAI,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    task_id: int,
+    episode_idx: int,
+    jsonl_file,
+) -> dict:
+    env = CodereviewagentEnvironment()
+
+    # Cycle env resets to land on the target task
+    for _ in range(task_id + 1):
+        obs = await env.async_reset()
+
     total_issues = obs.total_issues
+    episode_id = obs.metadata.get("episode_id", "?")
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     cumulative_reward = 0.0
     step = 0
-    log = []
+    t0 = time.perf_counter()
 
     print(f"\n{'─'*60}")
-    print(f"Task {task_id} [{obs.task_difficulty}]: {obs.file_name}  ({total_issues} issues)")
+    print(f"Task {task_id} [{obs.task_difficulty}] ep={episode_idx}  "
+          f"{obs.file_name}  ({total_issues} issues)")
     print(f"{'─'*60}")
 
     while True:
-        messages.append({"role": "user", "content": _format_prompt(obs, step)})
+        messages.append({"role": "user", "content": _format_user_message(obs, step)})
 
         try:
-            response = client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
-                temperature=0.1,
-                max_tokens=300,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
             assistant_text = response.choices[0].message.content or ""
             messages.append({"role": "assistant", "content": assistant_text})
 
             action = _parse_action(assistant_text)
-            obs = env.step(action)
+            obs, reward_obj, done, info = await env.async_step(action)
             step += 1
-            reward = obs.reward or 0.0
-            cumulative_reward += reward
-            done = obs.done
+            cumulative_reward += reward_obj.total
 
-            log.append({"step": step, "action": action.action_type.value, "reward": reward})
-            print(f"  {step:2d}. {action.action_type.value:<20} reward={reward:+.4f}  issues={obs.issues_found_count}/{total_issues}")
+            # ── JSONL: one record per step ────────────────────────────────
+            step_record = {
+                "episode_id": episode_id,
+                "episode_idx": episode_idx,
+                "task_id": task_id,
+                "task_difficulty": obs.task_difficulty,
+                "step": step,
+                "action_type": action.action_type.value,
+                "line_number": action.line_number,
+                "comment": (action.comment or "")[:120],
+                "reward_total": reward_obj.total,
+                "reward_components": reward_obj.components,
+                "reward_passed": reward_obj.passed,
+                "reward_explanation": reward_obj.explanation,
+                "cumulative_reward": round(cumulative_reward, 4),
+                "issues_found": obs.issues_found_count,
+                "total_issues": total_issues,
+                "done": done,
+            }
+            if jsonl_file:
+                jsonl_file.write(json.dumps(step_record) + "\n")
+                jsonl_file.flush()
+
+            print(
+                f"  {step:2d}. {action.action_type.value:<20}"
+                f" reward={reward_obj.total:+.4f}"
+                f"  cum={cumulative_reward:+.4f}"
+                f"  issues={obs.issues_found_count}/{total_issues}"
+                f"  {'DONE' if done else ''}"
+            )
 
             if done:
                 break
 
         except json.JSONDecodeError as exc:
-            print(f"  [WARN] JSON parse error: {exc} — forcing submit")
-            obs = env.step(CodereviewagentAction(action_type=ActionType.SUBMIT_REVIEW))
-            cumulative_reward += obs.reward or 0.0
+            print(f"  [WARN] JSON parse error at step {step}: {exc} — forcing submit")
+            obs, reward_obj, done, _ = await env.async_step(
+                CodereviewagentAction(action_type=ActionType.SUBMIT_REVIEW)
+            )
+            cumulative_reward += reward_obj.total
             break
+
         except Exception as exc:
             print(f"  [ERROR] {exc}")
             break
 
+    elapsed = time.perf_counter() - t0
     coverage = obs.issues_found_count / total_issues if total_issues else 0.0
-    result = {
+    print(
+        f"\n  → cumulative_reward={cumulative_reward:+.4f}"
+        f"  coverage={coverage:.0%}"
+        f"  steps={step}"
+        f"  elapsed={elapsed:.1f}s"
+    )
+    return {
+        "episode_id": episode_id,
+        "episode_idx": episode_idx,
         "task_id": task_id,
         "difficulty": obs.task_difficulty,
         "file_name": obs.file_name,
@@ -160,54 +208,93 @@ def run_task(client: OpenAI, model: str, task_id: int) -> dict:
         "issues_found": obs.issues_found_count,
         "total_issues": total_issues,
         "coverage": round(coverage, 3),
+        "elapsed_s": round(elapsed, 2),
     }
-    print(f"\n  → cumulative_reward={result['cumulative_reward']:+.4f}  coverage={coverage:.0%}")
-    return result
 
 
-def main() -> None:
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+async def async_main(args: argparse.Namespace) -> None:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         sys.exit("ERROR: OPENAI_API_KEY environment variable is not set.")
 
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    base_url = os.environ.get("OPENAI_BASE_URL")
-    client_kwargs = {"api_key": api_key}
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = OpenAI(**client_kwargs)
+    client = AsyncOpenAI(api_key=api_key)
+    print(f"CodeReviewAgent LLM Baseline  |  model={args.model}  temp={args.temperature}")
 
-    print(f"CodeReviewAgent Baseline  |  model={model}")
+    from CodeReviewAgent.server.tasks import TASKS
+    task_ids = [args.task_id] if args.task_id is not None else list(range(len(TASKS)))
 
-    results = [run_task(client, model, task_id) for task_id in range(3)]
+    jsonl_file = open(args.output, "a") if args.output else None  # noqa: SIM115
+    all_results: list[dict] = []
 
-    avg_reward = sum(r["cumulative_reward"] for r in results) / len(results)
-    avg_coverage = sum(r["coverage"] for r in results) / len(results)
+    try:
+        for task_id in task_ids:
+            for ep_idx in range(args.episodes):
+                result = await run_episode(
+                    client=client,
+                    model=args.model,
+                    temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                    task_id=task_id,
+                    episode_idx=ep_idx,
+                    jsonl_file=jsonl_file,
+                )
+                all_results.append(result)
+    finally:
+        if jsonl_file:
+            jsonl_file.close()
 
-    print(f"\n{'═'*60}")
+    avg_reward = sum(r["cumulative_reward"] for r in all_results) / len(all_results)
+    avg_coverage = sum(r["coverage"] for r in all_results) / len(all_results)
+
+    print(f"\n{'═'*65}")
     print("BASELINE SUMMARY")
-    print(f"{'═'*60}")
-    header = f"  {'Task':<6} {'Difficulty':<10} {'Reward':>8} {'Coverage':>10} {'Steps':>6}"
-    print(header)
-    print(f"  {'─'*50}")
-    for r in results:
+    print(f"{'═'*65}")
+    print(f"  {'Task':<6} {'Diff':<12} {'Ep':>3} {'Reward':>8} {'Coverage':>10} {'Steps':>6}")
+    print(f"  {'─'*53}")
+    for r in all_results:
         print(
-            f"  {r['task_id']:<6} {r['difficulty']:<10} "
-            f"{r['cumulative_reward']:>+8.4f} {r['coverage']:>9.0%}  {r['steps']:>5}"
+            f"  {r['task_id']:<6} {r['difficulty']:<12} {r['episode_idx']:>3}"
+            f" {r['cumulative_reward']:>+8.4f} {r['coverage']:>9.0%}  {r['steps']:>5}"
         )
-    print(f"  {'─'*50}")
-    print(f"  {'avg':<6} {'':10} {avg_reward:>+8.4f} {avg_coverage:>9.0%}")
+    print(f"  {'─'*53}")
+    print(f"  {'avg':<22} {avg_reward:>+8.4f} {avg_coverage:>9.0%}")
 
-    output = {
-        "model": model,
-        "results": results,
-        "summary": {"avg_cumulative_reward": avg_reward, "avg_coverage": avg_coverage},
+    output_data = {
+        "model": args.model,
+        "temperature": args.temperature,
+        "results": all_results,
+        "summary": {
+            "avg_cumulative_reward": round(avg_reward, 4),
+            "avg_coverage": round(avg_coverage, 3),
+            "total_episodes": len(all_results),
+        },
     }
-    out_path = os.path.join(os.path.dirname(__file__), "baseline_results.json")
-    with open(out_path, "w") as f:
-        json.dump(output, f, indent=2)
-    print(f"\nResults saved → {out_path}")
+    summary_path = args.summary or os.path.join(os.path.dirname(__file__), "baseline_results.json")
+    Path(summary_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(summary_path, "w") as f:
+        json.dump(output_data, f, indent=2)
+    print(f"\nSummary → {summary_path}")
+    if args.output:
+        print(f"Step log → {args.output}")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Async LLM baseline for CodeReviewAgent",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--max-tokens", type=int, default=350, dest="max_tokens")
+    parser.add_argument("--episodes", type=int, default=1, help="Episodes per task")
+    parser.add_argument("--task-id", type=int, default=None, dest="task_id",
+                        help="Run a single task ID (default: all)")
+    parser.add_argument("--output", default=None, help="JSONL path for per-step logs")
+    parser.add_argument("--summary", default=None, help="JSON path for episode summary")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(async_main(_parse_args()))

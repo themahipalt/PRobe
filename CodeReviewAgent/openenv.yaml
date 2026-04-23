@@ -35,13 +35,29 @@ tasks:
     max_steps: 30
     issues: 7
 
+  - id: 3
+    name: Async Worker Review
+    difficulty: medium
+    description: Find concurrency bugs and resource leaks in an async worker
+    max_steps: 20
+    issues: 5
+
+  - id: 4
+    name: Flask API Security Review
+    difficulty: hard
+    description: >
+      Comprehensive security review of a Flask REST API for injection flaws,
+      path traversal, insecure deserialization, and missing access controls
+    max_steps: 30
+    issues: 6
+
 observation:
   type: object
   fields:
     code_snippet: {type: string, description: "Python source to review"}
     task_description: {type: string, description: "Review instructions"}
     file_name: {type: string}
-    task_id: {type: integer, range: [0, 2]}
+    task_id: {type: integer, range: [0, 4]}
     task_difficulty: {type: string, values: [easy, medium, hard]}
     review_history: {type: array, description: "Actions taken so far"}
     step_count: {type: integer}
