@@ -1,25 +1,23 @@
 """
-Code Mutation Engine -- makes the world dynamic.
+Code Mutation Engine — makes each episode surface unique.
 
-Each call to ``mutate_task()`` returns a deep copy of a task with:
+Each call to ``mutate_task()`` returns a deep copy of a task with three
+deterministic, seed-controlled transforms applied:
 
-  1. Variable renaming  -- one identifier swapped for a synonym so the agent
-                           cannot memorise exact token strings between episodes.
-  2. Line shifting      -- an inert blank line inserted above the first issue,
-                           shifting all issue line_ranges down by 1.  The agent
-                           must *read* the code each episode.
-  3. Constant variance  -- numeric literals (e.g. range limits, sleep durations)
-                           are nudged +/-1 so the agent sees a fresh surface
-                           without changing the underlying bug.
+  1. Variable renaming   — one identifier swapped for a drop-in synonym so
+                           the agent cannot memorise exact token strings.
+  2. Line shifting       — one blank line inserted above the first issue,
+                           shifting all issue line_ranges down by 1.
+  3. Constant variance   — one numeric literal nudged ±1 so the agent
+                           sees a fresh surface without changing the bug.
 
-Mutation is fully deterministic given a seed, so training runs are
-reproducible while still being different across episodes.
+Mutations are fully deterministic given a seed, making training runs
+reproducible while still presenting a different surface each episode.
 
-Design principle
-----------------
+Design constraint
+-----------------
 Mutations must NEVER change *whether* a bug exists or *which line category*
-it falls in.  They only change surface tokens and line positions so the agent
-cannot exploit memorisation.
+it belongs to.  Only surface tokens and line positions may change.
 """
 
 from __future__ import annotations
@@ -30,94 +28,141 @@ import re
 from typing import Any
 
 
-# -- Variable synonym table --------------------------------------------------
-# Maps original identifiers -> list of drop-in synonyms.
-# Only single-token renames that do not affect semantics are listed.
+# ── Variable synonym table ───────────────────────────────────────────────────────────────────
+# Maps original identifier → list of semantically equivalent drop-in synonyms.
+# Only single-token renames that do not affect runtime behaviour are listed.
 
-_SYNONYMS: dict[str, list[str]] = {
-    "total":        ["acc", "running_total", "summed"],
-    "numbers":      ["values", "nums", "items"],
-    "result":       ["output", "response", "ret"],
-    "data":         ["payload", "records", "entries"],
-    "item":         ["record", "entry", "obj"],
-    "items":        ["records", "entries", "objects"],
-    "user":         ["account", "principal", "member"],
-    "users":        ["accounts", "principals", "members"],
-    "password":     ["passwd", "secret", "credential"],
-    "username":     ["user_name", "login", "uname"],
-    "command":      ["cmd", "instruction", "directive"],
-    "filename":     ["file_name", "fname", "path_name"],
-    "url":          ["endpoint", "uri", "address"],
-    "attempt":      ["try_num", "iteration", "retry_idx"],
-    "counter":      ["count", "tally", "n"],
-    "session":      ["conn", "http_session", "client"],
-    "results":      ["findings", "collected", "gathered"],
-    "cache":        ["store", "lookup", "memo"],
-    "transformed":  ["processed", "mapped", "converted"],
+_IDENTIFIER_SYNONYMS: dict[str, list[str]] = {
+    "total":       ["acc", "running_total", "summed"],
+    "numbers":     ["values", "nums", "items"],
+    "result":      ["output", "response", "ret"],
+    "data":        ["payload", "records", "entries"],
+    "item":        ["record", "entry", "obj"],
+    "items":       ["records", "entries", "objects"],
+    "user":        ["account", "principal", "member"],
+    "users":       ["accounts", "principals", "members"],
+    "password":    ["passwd", "secret", "credential"],
+    "username":    ["user_name", "login", "uname"],
+    "command":     ["cmd", "instruction", "directive"],
+    "filename":    ["file_name", "fname", "path_name"],
+    "url":         ["endpoint", "uri", "address"],
+    "attempt":     ["try_num", "iteration", "retry_idx"],
+    "counter":     ["count", "tally", "n"],
+    "session":     ["conn", "http_session", "client"],
+    "results":     ["findings", "collected", "gathered"],
+    "cache":       ["store", "lookup", "memo"],
+    "transformed": ["processed", "mapped", "converted"],
 }
+
+# Minimum numeric literal value after variance nudge (avoids nonsensical 0 or 1).
+_MIN_CONSTANT_VALUE: int = 2
 
 
 def mutate_task(base_task: dict[str, Any], seed: int) -> dict[str, Any]:
     """
     Return a mutated deep-copy of *base_task* using *seed* for reproducibility.
 
-    The returned task is structurally identical to the original -- same keys,
-    same issue ids, same categories -- but with surface-level code changes and
-    adjusted line_ranges.
+    The returned task is structurally identical to the original — same keys,
+    same issue ids, same categories — but with surface-level code changes and
+    adjusted line_ranges to match.
     """
     rng = random.Random(seed)
-    task: dict[str, Any] = copy.deepcopy(base_task)
+    mutated_task: dict[str, Any] = copy.deepcopy(base_task)
 
-    code: str = task["code"]
-    issues: list[dict[str, Any]] = task["issues"]
+    source_code: str = mutated_task["code"]
+    issues: list[dict[str, Any]] = mutated_task["issues"]
 
-    # -- 1. Variable rename --------------------------------------------------
-    candidates = [orig for orig in _SYNONYMS if re.search(rf"\b{orig}\b", code)]
-    if candidates:
-        original = rng.choice(candidates)
-        replacement = rng.choice(_SYNONYMS[original])
-        # Whole-word replace to avoid partial matches.
-        code = re.sub(rf"\b{original}\b", replacement, code)
-        # Keep the keyword list in sync so the grader still matches.
-        for issue in issues:
-            issue["keywords"] = [
-                replacement if kw == original else kw
-                for kw in issue["keywords"]
-            ]
+    source_code, issues = _apply_variable_rename(source_code, issues, rng)
+    source_code, issues = _apply_line_shift(source_code, issues)
+    source_code = _apply_constant_variance(source_code, rng)
 
-    # -- 2. Line shift -- insert one blank line before the first issue --------
-    if issues:
-        first_line = min(iss["line_range"][0] for iss in issues)
-        # Convert 1-based line number to 0-based list index.
-        insert_before = max(0, first_line - 2)
-        lines = code.split("\n")
-        lines.insert(insert_before, "")
-        code = "\n".join(lines)
-        # Shift every issue line_range down by 1 to match the new positions.
-        for issue in issues:
-            start, end = issue["line_range"]
-            issue["line_range"] = (start + 1, end + 1)
+    mutated_task["code"] = source_code
+    mutated_task["issues"] = issues
+    mutated_task["_mutation_seed"] = seed
+    return mutated_task
 
-    # -- 3. Constant variance -- nudge one numeric literal -------------------
-    # Exclude numbers that appear only inside a comment on the same line,
-    # to avoid corrupting annotated line references.
+
+# ── Private mutation helpers ───────────────────────────────────────────────────────────
+
+def _apply_variable_rename(
+    source_code: str,
+    issues: list[dict[str, Any]],
+    rng: random.Random,
+) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Swap one identifier in the source for a synonym from _IDENTIFIER_SYNONYMS.
+
+    Also updates each issue's keyword list so the grader continues to match
+    after the rename.
+    """
+    renameable = [orig for orig in _IDENTIFIER_SYNONYMS if re.search(rf"\b{orig}\b", source_code)]
+    if not renameable:
+        return source_code, issues
+
+    original_identifier = rng.choice(renameable)
+    replacement_identifier = rng.choice(_IDENTIFIER_SYNONYMS[original_identifier])
+
+    source_code = re.sub(rf"\b{original_identifier}\b", replacement_identifier, source_code)
+
+    # Keep issue keywords in sync so the grader still matches post-rename.
+    for issue in issues:
+        issue["keywords"] = [
+            replacement_identifier if kw == original_identifier else kw
+            for kw in issue["keywords"]
+        ]
+    return source_code, issues
+
+
+def _apply_line_shift(
+    source_code: str,
+    issues: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Insert one blank line above the first issue, shifting all line_ranges down by 1.
+
+    Forces the agent to re-read the code each episode rather than relying on
+    memorised line numbers.
+    """
+    if not issues:
+        return source_code, issues
+
+    first_issue_line = min(iss["line_range"][0] for iss in issues)
+    # Convert 1-based line number to 0-based list index.
+    insert_position = max(0, first_issue_line - 2)
+
+    lines = source_code.split("\n")
+    lines.insert(insert_position, "")
+    source_code = "\n".join(lines)
+
+    for issue in issues:
+        start, end = issue["line_range"]
+        issue["line_range"] = (start + 1, end + 1)
+
+    return source_code, issues
+
+
+def _apply_constant_variance(source_code: str, rng: random.Random) -> str:
+    """
+    Nudge one numeric literal by ±1 to vary the code surface without changing
+    which bug is present.
+
+    Numbers that appear only inside a comment on the same line are excluded to
+    avoid corrupting annotated line references.
+    """
     numeric_matches = [
-        m
-        for m in re.finditer(r"\b([2-9]|[1-9]\d+)\b", code)
-        if not re.search(r"#[^\n]*" + re.escape(m.group()), code[: m.end()])
+        match
+        for match in re.finditer(r"\b([2-9]|[1-9]\d+)\b", source_code)
+        if not re.search(r"#[^\n]*" + re.escape(match.group()), source_code[: match.end()])
     ]
-    if numeric_matches:
-        chosen = rng.choice(numeric_matches)
-        original_val = int(chosen.group())
-        delta = rng.choice([-1, 1])
-        new_val = max(2, original_val + delta)  # never go below 2
-        code = code[: chosen.start()] + str(new_val) + code[chosen.end() :]
+    if not numeric_matches:
+        return source_code
 
-    task["code"] = code
-    task["issues"] = issues
-    # Tag the task so the environment can record mutation metadata.
-    task["_mutation_seed"] = seed
-    return task
+    chosen_match = rng.choice(numeric_matches)
+    original_value = int(chosen_match.group())
+    nudge = rng.choice([-1, 1])
+    new_value = max(_MIN_CONSTANT_VALUE, original_value + nudge)
+
+    return source_code[: chosen_match.start()] + str(new_value) + source_code[chosen_match.end() :]
 
 
 __all__ = ["mutate_task"]

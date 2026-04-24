@@ -14,7 +14,7 @@ Terminal (SUBMIT_REVIEW):
 
 Maximum achievable total: ~1.0   Minimum: -1.0
 
-Anti-exploit rules (v3):
+Anti-exploit rules:
   A comment MUST satisfy ALL of:
     1. keyword_hit  -- at least one issue keyword appears in the comment text
     2. line_hit     -- comment line_number is within +/-LINE_TOLERANCE of the issue
@@ -31,30 +31,49 @@ try:
 except ImportError:
     from agent.models import RewardType  # type: ignore[no-redef]
 
-# -- Grading hyper-parameters ------------------------------------------------
-LINE_TOLERANCE: int = 2         # lines either side of an issue's declared range
-MIN_COMMENT_LENGTH: int = 15    # chars -- comments shorter than this earn no credit
+# ── Grading hyper-parameters ─────────────────────────────────────────────────
 
-ISSUE_REWARD_POOL: float = 0.40     # max cumulative credit from ADD_COMMENT (reduced to make room)
-CLASSIFICATION_POOL: float = 0.20  # max cumulative credit for correct bug/backdoor classification
-COVERAGE_POOL: float = 0.15        # terminal coverage bonus ceiling
-DECISION_REWARD: float = 0.15       # +/- for correct/incorrect terminal action (incl. escalate)
-DECISION_COVERAGE_GATE: float = 0.30  # min weighted coverage to EARN the decision bonus
-EFFICIENCY_POOL: float = 0.10       # max terminal efficiency bonus
-COVERAGE_THRESHOLD: float = 0.60    # min coverage to unlock efficiency bonus
-FALSE_POSITIVE_PENALTY: float = -0.05  # per substantive unmatched comment
-MISCLASSIFY_PENALTY: float = -0.05  # correct issue found but wrong classification label
-FORMAT_BONUS: float = 0.02           # awarded once when output contains a valid non-empty JSON array
+LINE_TOLERANCE: int = 2           # ± lines around a declared issue range
+MIN_COMMENT_LENGTH: int = 15      # minimum chars for a comment to earn credit
+
+ISSUE_REWARD_POOL: float = 0.40       # max cumulative credit from ADD_COMMENT
+CLASSIFICATION_POOL: float = 0.20    # max cumulative credit for correct classification
+COVERAGE_POOL: float = 0.15          # terminal coverage bonus ceiling
+DECISION_REWARD: float = 0.15        # ± for correct/incorrect terminal action
+DECISION_COVERAGE_GATE: float = 0.30 # min weighted coverage to earn the decision bonus
+EFFICIENCY_POOL: float = 0.10        # max terminal efficiency bonus
+COVERAGE_THRESHOLD: float = 0.60     # min coverage to unlock efficiency bonus
+FALSE_POSITIVE_PENALTY: float = -0.05  # per substantive comment that matched no issue
+MISSCLASSIFY_PENALTY: float = -0.05    # correct issue found but wrong classification label
+FORMAT_BONUS: float = 0.02             # awarded once for a valid non-empty JSON array
+
+# Type alias for the per-component score breakdown returned by score_comment.
+ScoreBreakdown = dict[str, float]
 
 
 class CodeReviewGrader:
-    """Scores agent actions against a task's ground-truth issue list."""
+    """
+    Scores agent actions against a task's ground-truth issue list.
+
+    All scoring is deterministic and requires no external calls — the grader
+    is safe to instantiate from multiple threads or GRPO rollout workers.
+    """
 
     def __init__(self, task: dict[str, Any]) -> None:
-        self.task = task
-        self.total_weight: float = sum(iss["weight"] for iss in task["issues"])
+        self._task = task
+        self._total_weight: float = sum(iss["weight"] for iss in task["issues"])
 
-    # -- Per-comment scoring -------------------------------------------------
+    @property
+    def task(self) -> dict[str, Any]:
+        """Read-only access to the underlying task definition."""
+        return self._task
+
+    @property
+    def total_weight(self) -> float:
+        """Sum of all issue weights. Kept for backward compatibility."""
+        return self._total_weight
+
+    # ── Per-comment scoring ───────────────────────────────────────────────────
 
     def score_comment(
         self,
@@ -62,70 +81,72 @@ class CodeReviewGrader:
         comment: str | None,
         already_found: list[str],
         classification: str | None = None,
-    ) -> tuple[float, list[str], dict[str, float]]:
+    ) -> tuple[float, list[str], ScoreBreakdown]:
         """
         Score an ADD_COMMENT action.
 
+        A comment earns issue credit only when ALL three conditions hold:
+          - keyword_hit: at least one issue keyword appears in the comment text
+          - line_hit:    line_number is within ±LINE_TOLERANCE of the issue range
+          - substantive: comment body is longer than MIN_COMMENT_LENGTH characters
+
         Returns:
-            (reward_delta, newly_found_issue_ids, component_breakdown)
-
-        Match condition (ALL required -- no shortcut)::
-
-            keyword_hit AND line_hit AND substantive
-
-        If the issue has a ``classification`` field, the caller's classification
-        is compared and either earns a bonus or a penalty.
+            A 3-tuple of (reward_delta, newly_found_issue_ids, component_breakdown).
         """
         if not comment:
             return 0.0, [], {}
 
         comment_lower = comment.lower()
-        # Compute once -- used for both the credit path and the penalty path.
-        substantive: bool = len(comment.strip()) > MIN_COMMENT_LENGTH
+        is_substantive: bool = len(comment.strip()) > MIN_COMMENT_LENGTH
 
-        newly_found: list[str] = []
+        newly_found_ids: list[str] = []
         issue_credit: float = 0.0
         classification_credit: float = 0.0
 
-        for issue in self.task["issues"]:
+        for issue in self._task["issues"]:
             if issue["id"] in already_found:
                 continue
 
             keyword_hit = any(kw.lower() in comment_lower for kw in issue["keywords"])
             line_hit = self._line_in_range(line_number, issue["line_range"])
 
-            if keyword_hit and line_hit and substantive:
-                credit = (issue["weight"] / self.total_weight) * ISSUE_REWARD_POOL
-                newly_found.append(issue["id"])
-                issue_credit += credit
+            if keyword_hit and line_hit and is_substantive:
+                issue_credit += (issue["weight"] / self._total_weight) * ISSUE_REWARD_POOL
+                newly_found_ids.append(issue["id"])
+                classification_credit += self._score_classification(
+                    issue=issue,
+                    given_classification=classification,
+                )
 
-                # Classification bonus/penalty (only for issues that declare one)
-                expected_cls = issue.get("classification")
-                if expected_cls:
-                    norm_cls = (classification or "").lower().replace("-", "_")
-                    if norm_cls == expected_cls.lower().replace("-", "_"):
-                        classification_credit += (
-                            issue["weight"] / self.total_weight
-                        ) * CLASSIFICATION_POOL
-                    else:
-                        classification_credit += MISCLASSIFY_PENALTY
-
-        # Penalise substantive comments that matched nothing.
         false_positive_penalty: float = (
-            FALSE_POSITIVE_PENALTY if (not newly_found and substantive) else 0.0
+            FALSE_POSITIVE_PENALTY if (not newly_found_ids and is_substantive) else 0.0
         )
 
         total = round(issue_credit + classification_credit + false_positive_penalty, 4)
-        breakdown = {
+        breakdown: ScoreBreakdown = {
             "issue_credit": round(issue_credit, 4),
             "classification_credit": round(classification_credit, 4),
             "false_positive_penalty": round(false_positive_penalty, 4),
         }
-        return total, newly_found, breakdown
+        return total, newly_found_ids, breakdown
 
-    # -- Terminal scoring ----------------------------------------------------
+    def _score_classification(
+        self,
+        issue: dict[str, Any],
+        given_classification: str | None,
+    ) -> float:
+        """Return the classification bonus or penalty for a single matched issue."""
+        expected = issue.get("classification")
+        if not expected:
+            return 0.0
+        normalised = (given_classification or "").lower().replace("-", "_")
+        if normalised == expected.lower().replace("-", "_"):
+            return (issue["weight"] / self._total_weight) * CLASSIFICATION_POOL
+        return MISCLASSIFY_PENALTY
 
-    def final_score(
+    # ── Terminal scoring ──────────────────────────────────────────────────────
+
+    def compute_final_score(
         self,
         issues_found: list[str],
         review_decision: str | None,
@@ -135,72 +156,101 @@ class CodeReviewGrader:
         """
         Compute the terminal reward on SUBMIT_REVIEW or ESCALATE_TO_SECURITY_REVIEW.
 
-        Returns a fully-typed RewardType with a per-component breakdown.
-        De-duplicates issues_found with stable ordering so results are
+        Deduplicates issues_found with stable ordering so results are
         deterministic regardless of insertion order.
         """
-        unique_found: list[str] = sorted(set(issues_found))
-        found_weight = sum(
-            iss["weight"]
-            for iss in self.task["issues"]
-            if iss["id"] in unique_found
-        )
-        coverage = found_weight / self.total_weight if self.total_weight > 0 else 0.0
+        unique_found_ids: list[str] = sorted(set(issues_found))
+        weighted_coverage = self._compute_weighted_coverage(unique_found_ids)
+        correct_decision: str = self._task.get("correct_decision", "request_changes")
 
-        correct_decision: str = self.task.get("correct_decision", "request_changes")
-        # Decision bonus is only earned when the agent has found enough issues to
-        # demonstrate it actually read the code.  This closes the exploit where an
-        # agent that never reads the code always says "request_changes" and earns
-        # +DECISION_REWARD for free.  An agent with zero coverage that picks the
-        # correct decision still gets no penalty (0.0), but also no bonus.
-        if review_decision == correct_decision and coverage >= DECISION_COVERAGE_GATE:
-            decision_score = DECISION_REWARD
-        elif review_decision is not None and review_decision != correct_decision:
-            decision_score = -DECISION_REWARD
-        else:
-            decision_score = 0.0  # correct decision but insufficient coverage — no reward, no penalty
-
-        step_efficiency = max(0.0, 1.0 - steps_used / max_steps)
-        efficiency_bonus = (
-            round(EFFICIENCY_POOL * step_efficiency, 4)
-            if coverage >= COVERAGE_THRESHOLD
-            else 0.0
-        )
-        coverage_bonus = round(coverage * COVERAGE_POOL, 4)
+        coverage_bonus = round(weighted_coverage * COVERAGE_POOL, 4)
+        decision_score = self._compute_decision_score(review_decision, correct_decision, weighted_coverage)
+        efficiency_bonus = self._compute_efficiency_bonus(weighted_coverage, steps_used, max_steps)
 
         raw_total = coverage_bonus + decision_score + efficiency_bonus
-        clamped = round(max(-1.0, min(1.0, raw_total)), 4)
+        clamped_total = round(max(-1.0, min(1.0, raw_total)), 4)
 
-        components = {
-            "coverage_bonus": coverage_bonus,
-            "decision_score": round(decision_score, 4),
-            "efficiency_bonus": efficiency_bonus,
-        }
-        total_issues = len(self.task["issues"])
+        total_issue_count = len(self._task["issues"])
+        is_correct = review_decision == correct_decision
         explanation = (
-            f"Found {len(unique_found)}/{total_issues} issues "
-            f"(weighted coverage {coverage:.0%}). "
+            f"Found {len(unique_found_ids)}/{total_issue_count} issues "
+            f"(weighted coverage {weighted_coverage:.0%}). "
             f"Decision {review_decision!r} was "
-            f"{'correct' if review_decision == correct_decision else 'incorrect'} "
+            f"{'correct' if is_correct else 'incorrect'} "
             f"(expected {correct_decision!r}). "
             f"Used {steps_used}/{max_steps} steps."
         )
         return RewardType(
-            total=clamped,
-            components=components,
-            passed=review_decision == correct_decision and coverage >= COVERAGE_THRESHOLD,
+            total=clamped_total,
+            components={
+                "coverage_bonus": coverage_bonus,
+                "decision_score": round(decision_score, 4),
+                "efficiency_bonus": efficiency_bonus,
+            },
+            passed=is_correct and weighted_coverage >= COVERAGE_THRESHOLD,
             explanation=explanation,
             step=steps_used,
             terminal=True,
         )
 
-    # -- Helper --------------------------------------------------------------
+    # Keep the old name as a thin alias so existing call-sites aren't broken.
+    def final_score(
+        self,
+        issues_found: list[str],
+        review_decision: str | None,
+        steps_used: int,
+        max_steps: int,
+    ) -> RewardType:
+        """Alias for compute_final_score — retained for backward compatibility."""
+        return self.compute_final_score(issues_found, review_decision, steps_used, max_steps)
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _compute_weighted_coverage(self, unique_found_ids: list[str]) -> float:
+        """Return the fraction of total issue weight covered by the found issues."""
+        if self._total_weight <= 0:
+            return 0.0
+        found_weight = sum(
+            iss["weight"]
+            for iss in self._task["issues"]
+            if iss["id"] in unique_found_ids
+        )
+        return found_weight / self._total_weight
+
+    @staticmethod
+    def _compute_decision_score(
+        review_decision: str | None,
+        correct_decision: str,
+        weighted_coverage: float,
+    ) -> float:
+        """
+        Return the decision bonus or penalty.
+
+        The bonus is gated on coverage >= DECISION_COVERAGE_GATE to prevent
+        an agent from earning +DECISION_REWARD by always guessing the correct
+        terminal action without reading any code.
+        """
+        if review_decision == correct_decision and weighted_coverage >= DECISION_COVERAGE_GATE:
+            return DECISION_REWARD
+        if review_decision is not None and review_decision != correct_decision:
+            return -DECISION_REWARD
+        # Correct decision but insufficient coverage — neutral, no bonus or penalty.
+        return 0.0
+
+    @staticmethod
+    def _compute_efficiency_bonus(weighted_coverage: float, steps_used: int, max_steps: int) -> float:
+        """Return the step-efficiency bonus, unlocked only when coverage >= COVERAGE_THRESHOLD."""
+        if weighted_coverage < COVERAGE_THRESHOLD:
+            return 0.0
+        step_efficiency = max(0.0, 1.0 - steps_used / max_steps)
+        return round(EFFICIENCY_POOL * step_efficiency, 4)
 
     @staticmethod
     def _line_in_range(
         line_number: int | None,
         line_range: tuple[int, int],
     ) -> bool:
+        """Return True when line_number falls within the issue range ± LINE_TOLERANCE."""
         if line_number is None:
             return False
         start, end = line_range
