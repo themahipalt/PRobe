@@ -116,7 +116,7 @@ class ProbeObservation(Observation):
     code_snippet: str = Field(default="", description="Python source code to review (mutated each episode)")
     task_description: str = Field(default="", description="Review instructions and goals")
     file_name: str = Field(default="", description="Name of the file being reviewed")
-    task_id: int = Field(default=0, ge=0, description="Current task index (0–6)")
+    task_id: int = Field(default=0, ge=0, description="Current task index (0–9)")
     task_difficulty: str = Field(default="ultra-easy", description="Task difficulty label")
     review_history: list[dict[str, Any]] = Field(
         default_factory=list,

@@ -61,7 +61,8 @@ log = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class EpisodeState:
-    """All mutable state for a single review episode.
+    """
+    All mutable state for a single review episode.
 
     Using a dataclass eliminates stringly-typed dict key access and makes
     the shape of an episode explicit and statically checkable.
@@ -70,14 +71,14 @@ class EpisodeState:
     task: dict[str, Any]
     review_comments: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     issues_found: list[str] = dataclasses.field(default_factory=list)
-    correct_classifications: int = 0      # issues found WITH correct bug/backdoor label
+    # Issues found with the correct bug/backdoor label.
+    correct_classifications: int = 0
     review_decision: str | None = None
     review_submitted: bool = False
     cumulative_reward: float = 0.0
-    # Causal world-modelling state
+    # Progressive context unlocked by finding key issues.
     context_hints: list[str] = dataclasses.field(default_factory=list)
     hints_unlocked: set[str] = dataclasses.field(default_factory=set)
-    # Scanner state
     scanner_used: bool = False
 
 
@@ -134,58 +135,57 @@ class ProbeEnvironment(Environment):
     ) -> tuple[ProbeObservation, RewardType, bool, dict[str, Any]]:
         self._step_count += 1
         current_task = self._episode.task
-        done = False
-        reward_obj: RewardType
+        episode_done = False
+        step_reward: RewardType
 
         if action.action_type == ActionType.ADD_COMMENT:
-            reward_obj = self._handle_add_comment(action)
+            step_reward = self._handle_add_comment(action)
         elif action.action_type == ActionType.GET_CONTEXT:
-            reward_obj = self._handle_get_context(action)
+            step_reward = self._handle_get_context(action)
         elif action.action_type == ActionType.RUN_SCANNER:
-            reward_obj = self._handle_run_scanner()
+            step_reward = self._handle_run_scanner()
         elif action.action_type == ActionType.REQUEST_CHANGES:
-            reward_obj = self._handle_request_changes(action)
+            step_reward = self._handle_request_changes(action)
         elif action.action_type == ActionType.APPROVE:
-            reward_obj = self._handle_approve()
+            step_reward = self._handle_approve()
         elif action.action_type == ActionType.SUBMIT_REVIEW:
-            reward_obj, done = self._handle_submit_review()
+            step_reward, episode_done = self._handle_submit_review()
         elif action.action_type == ActionType.ESCALATE_TO_SECURITY_REVIEW:
-            reward_obj, done = self._handle_escalate(action)
+            step_reward, episode_done = self._handle_escalate(action)
         else:
-            reward_obj = RewardType(
+            step_reward = RewardType(
                 total=-0.05,
-                components={"illegal_action": -0.05},
+                components={"illegal_action_penalty": -0.05},
                 passed=False,
                 explanation=f"Unknown action type: {action.action_type}",
                 step=self._step_count,
                 terminal=False,
             )
 
-        # Step-budget exhaustion
-        if not done and self._step_count >= current_task["max_steps"]:
-            penalised = max(-1.0, reward_obj.total - 0.05)
-            components = {**reward_obj.components, "step_budget_penalty": -0.05}
-            reward_obj = RewardType(
-                total=round(penalised, 4),
-                components=components,
+        # Apply step-budget penalty when the episode runs out of steps.
+        if not episode_done and self._step_count >= current_task["max_steps"]:
+            penalised_total = max(-1.0, step_reward.total - 0.05)
+            step_reward = RewardType(
+                total=round(penalised_total, 4),
+                components={**step_reward.components, "step_budget_penalty": -0.05},
                 passed=False,
-                explanation=reward_obj.explanation + " [Step limit reached.]",
+                explanation=step_reward.explanation + " [Step limit reached.]",
                 step=self._step_count,
                 terminal=True,
             )
-            done = True
+            episode_done = True
 
         self._episode.cumulative_reward = round(
-            self._episode.cumulative_reward + reward_obj.total, 4
+            self._episode.cumulative_reward + step_reward.total, 4
         )
-        obs = self._build_observation(reward=reward_obj.total, done=done)
+        observation = self._build_observation(reward=step_reward.total, done=episode_done)
         info = {
             "episode_id": self._episode_id,
             "cumulative_reward": self._episode.cumulative_reward,
             "issues_found": list(self._episode.issues_found),
             "review_decision": self._episode.review_decision,
         }
-        return obs, reward_obj, done, info
+        return observation, step_reward, episode_done, info
 
     async def async_state(self) -> dict[str, Any]:
         task = self._episode.task
@@ -309,51 +309,49 @@ class ProbeEnvironment(Environment):
         self, action: ProbeAction
     ) -> RewardType:
         """
-        GET_CONTEXT — reveal ±5 lines around the requested line number.
+        GET_CONTEXT - reveal +/-5 lines around the requested line number.
 
         Costs a small step penalty (-0.01) to discourage random probing,
-        but rewards focused investigation (line near an actual issue: 0.0
-        net cost — penalty waived).
+        but waives the penalty when the probed line is near a real issue.
         """
-        line_number = action.line_number
+        requested_line = action.line_number
         task = self._episode.task
         code_lines = task["code"].split("\n")
 
-        if line_number is None:
+        if requested_line is None:
             return RewardType(
                 total=-0.02,
-                components={"invalid_context_probe": -0.02},
+                components={"invalid_context_probe_penalty": -0.02},
                 passed=False,
                 explanation="GET_CONTEXT requires a line_number.",
                 step=self._step_count,
                 terminal=False,
             )
 
-        # Build context snippet centred on the requested line
-        window_start = max(0, line_number - 6)
-        window_end = min(len(code_lines), line_number + 5)
-        snippet = "\n".join(
-            f"{idx + 1:3}: {code_lines[idx]}"
-            for idx in range(window_start, window_end)
+        window_start = max(0, requested_line - 6)
+        window_end = min(len(code_lines), requested_line + 5)
+        context_snippet = "\n".join(
+            f"{line_idx + 1:3}: {code_lines[line_idx]}"
+            for line_idx in range(window_start, window_end)
         )
 
-        is_near_known_issue = any(
-            (iss["line_range"][0] - LINE_TOLERANCE) <= line_number <= (iss["line_range"][1] + LINE_TOLERANCE)
+        is_near_real_issue = any(
+            (iss["line_range"][0] - LINE_TOLERANCE) <= requested_line <= (iss["line_range"][1] + LINE_TOLERANCE)
             for iss in task["issues"]
         )
-        penalty = 0.0 if is_near_known_issue else -0.01
+        probe_penalty = 0.0 if is_near_real_issue else -0.01
 
         self._episode.review_comments.append({
             "type": "context_probe",
-            "line": line_number,
-            "context": snippet,
+            "line": requested_line,
+            "context": context_snippet,
         })
 
         return RewardType(
-            total=penalty,
-            components={"context_probe_penalty": penalty},
-            passed=is_near_known_issue,
-            explanation=f"Context around line {line_number}:\n{snippet}",
+            total=probe_penalty,
+            components={"context_probe_penalty": probe_penalty},
+            passed=is_near_real_issue,
+            explanation=f"Context around line {requested_line}:\n{context_snippet}",
             step=self._step_count,
             terminal=False,
         )
@@ -418,20 +416,11 @@ class ProbeEnvironment(Environment):
         self._episode.review_comments.append(
             {"type": "request_changes", "text": action.comment}
         )
-        if self._episode.issues_found:
-            return RewardType(
-                total=0.05,
-                components={"decision_bonus": 0.05},
-                passed=True,
-                explanation="REQUEST_CHANGES after finding issues — correct.",
-                step=self._step_count,
-                terminal=False,
-            )
         return RewardType(
-            total=-0.05,
-            components={"premature_decision_penalty": -0.05},
-            passed=False,
-            explanation="REQUEST_CHANGES with no issues found yet.",
+            total=0.0,
+            components={},
+            passed=True,
+            explanation="REQUEST_CHANGES recorded. Terminal reward applied on SUBMIT_REVIEW.",
             step=self._step_count,
             terminal=False,
         )
@@ -439,13 +428,14 @@ class ProbeEnvironment(Environment):
     def _handle_approve(self) -> RewardType:
         self._episode.review_decision = "approve"
         total_issue_count = len(self._episode.task["issues"])
-        found_count = len(set(self._episode.issues_found))
-        if total_issue_count > 0 and found_count < total_issue_count * 0.5:
+        found_issue_count = len(set(self._episode.issues_found))
+        coverage_fraction = found_issue_count / total_issue_count if total_issue_count > 0 else 0.0
+        if coverage_fraction < 0.5:
             return RewardType(
                 total=-0.15,
                 components={"bad_approval_penalty": -0.15},
                 passed=False,
-                explanation=f"APPROVE with only {found_count}/{total_issue_count} issues found.",
+                explanation=f"APPROVE with only {found_issue_count}/{total_issue_count} issues found.",
                 step=self._step_count,
                 terminal=False,
             )
@@ -474,7 +464,7 @@ class ProbeEnvironment(Environment):
         self._episode.review_submitted = True
         task = self._episode.task
         unique_issues_found = list(set(self._episode.issues_found))
-        reward_obj = self._grader.final_score(
+        terminal_reward = self._grader.final_score(
             issues_found=unique_issues_found,
             review_decision=self._episode.review_decision,
             steps_used=self._step_count,
@@ -487,11 +477,11 @@ class ProbeEnvironment(Environment):
                 len(unique_issues_found),
                 task["id"],
             )
-        return reward_obj, True
+        return terminal_reward, True
 
     def _handle_escalate(self, action: ProbeAction) -> tuple[RewardType, bool]:
         """
-        ESCALATE_TO_SECURITY_REVIEW — terminal action for adversarial tasks.
+        ESCALATE_TO_SECURITY_REVIEW - terminal action for adversarial tasks.
 
         Correct only when the task has escalation_required=True.
         Calling on a non-adversarial task incurs a false-alarm penalty.
@@ -512,7 +502,7 @@ class ProbeEnvironment(Environment):
         self._episode.review_decision = "escalate_to_security_review"
         task = self._episode.task
         unique_issues_found = list(set(self._episode.issues_found))
-        reward_obj = self._grader.final_score(
+        terminal_reward = self._grader.final_score(
             issues_found=unique_issues_found,
             review_decision="escalate_to_security_review",
             steps_used=self._step_count,
@@ -520,7 +510,7 @@ class ProbeEnvironment(Environment):
         )
         if unique_issues_found:
             self._memory.record(task["id"], unique_issues_found)
-        return reward_obj, True
+        return terminal_reward, True
 
     def _build_observation(self, reward: float, done: bool) -> ProbeObservation:
         task = self._episode.task

@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import pathlib
 import random
@@ -51,6 +52,8 @@ import re
 import sys
 import time
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Path bootstrap — works whether installed as package or run bare
@@ -226,11 +229,21 @@ def compute_reward(task: dict[str, Any], raw_output: str, seed: int = 0) -> dict
     """
     Score a raw model completion against a task.
 
+    ``task`` may be either a raw (unmutated) TASKS entry or an already-mutated
+    copy.  If ``task`` carries a ``_mutation_seed`` key it has already been
+    mutated; in that case we use it directly to avoid double-mutation, which
+    would shift line ranges twice and cause the grader to score against wrong
+    lines.
+
     Returns a dict with keys:
       total, issue_reward, classification_reward, format_bonus, coverage_bonus,
       decision_score, efficiency_bonus, false_positive_penalty
     """
-    mutated = mutate_task(task, seed=seed)
+    # Only mutate when the task hasn't been mutated yet.
+    if "_mutation_seed" in task:
+        mutated = task
+    else:
+        mutated = mutate_task(task, seed=seed)
     grader = CodeReviewGrader(mutated)
 
     comments, decision = _parse_output(raw_output)
@@ -655,7 +668,10 @@ def train(args: argparse.Namespace) -> None:
 
     # -- Curriculum state shared via closure --------------------------------
     _curriculum_state: dict = {"step": len(logger.records)}
-    _current_task_map: dict[str, dict] = {}  # prompt_prefix -> task dict
+    # Map sample_id (stable unique key per sample) → task dict.
+    # Using prompt[:200] as a key caused collisions on adversarial tasks 7/8/9
+    # whose prompts share an identical ~130-char opening.
+    _current_task_map: dict[str, dict] = {}  # sample_id -> task dict
 
     def _curriculum_generator():
         """
@@ -669,7 +685,10 @@ def train(args: argparse.Namespace) -> None:
             samples = build_grpo_dataset(task_ids, n_per_task=n_per_task, step=local_step)
             _current_task_map.clear()
             for s in samples:
-                _current_task_map[s["prompt"][:200]] = s["task"]
+                # Use a collision-free key: task_id + seed uniquely identifies each sample.
+                sample_id = f"{s['task_id']}:{s['seed']}"
+                s["_sample_id"] = sample_id
+                _current_task_map[sample_id] = s["task"]
             for s in samples:
                 yield {
                     "prompt": [
@@ -678,6 +697,8 @@ def train(args: argparse.Namespace) -> None:
                     ],
                     "task_id": s["task_id"],
                     "seed": s["seed"],
+                    # Pass sample_id through so the reward callback can look up the task.
+                    "sample_id": s["_sample_id"],
                 }
             local_step += 1
             _curriculum_state["step"] = local_step
@@ -693,11 +714,14 @@ def train(args: argparse.Namespace) -> None:
     # -- GRPO reward function wrapper --------------------------------------
     def grpo_reward_fn(prompts: list[str], completions: list[str], **kwargs) -> list[float]:
         rewards = []
-        for prompt, completion in zip(prompts, completions):
-            # prompt may be a formatted string after chat-template application
-            task = _current_task_map.get(prompt[:200])
+        for i, (prompt, completion) in enumerate(zip(prompts, completions)):
+            # Prefer the explicit sample_id passed through the dataset columns.
+            sample_ids = kwargs.get("sample_id", [])
+            sample_id = sample_ids[i] if i < len(sample_ids) else None
+            task = _current_task_map.get(sample_id) if sample_id else None
             if task is None:
-                rewards.append(-0.1)
+                log.warning("grpo_reward_fn: task lookup miss for sample_id=%r", sample_id)
+                rewards.append(0.0)
                 continue
             result = compute_reward(task, completion, seed=task.get("_mutation_seed", 0))
             rewards.append(float(result["total"]))
@@ -712,11 +736,6 @@ def train(args: argparse.Namespace) -> None:
         reward_funcs=grpo_reward_fn,
     )
 
-    # -- Main training loop ------------------------------------------------
-    global_step = len(logger.records)
-    best_adv_reward: dict[int, float] = {}
-    worst_adv_reward: dict[int, float] = {}
-
     print(f"\nStarting GRPO training for {args.steps} steps ...")
     print(f"  Model: {args.model} | Unsloth: {use_unsloth} | Group size: {args.group_size}")
     print(f"  Batch: {args.batch_size} | Grad accum: {args.grad_accum} | LR: {args.lr}")
@@ -725,78 +744,81 @@ def train(args: argparse.Namespace) -> None:
     train_result = trainer.train()
     loss = train_result.training_loss if hasattr(train_result, "training_loss") else None
 
-    # -- Post-training evaluation per task ---------------------------------
-    print("\nEvaluating trained model on all tasks ...")
-    for step in range(global_step, global_step + args.steps):
-        phase, task_ids = _get_phase(step)
-        n_per_task = max(1, args.group_size // max(len(task_ids), 1))
-        samples = build_grpo_dataset(task_ids, n_per_task=n_per_task, step=step)
+    # -- Post-training evaluation (one sample per task, fixed seed) -------
+    # Evaluate on a small held-out set so eval records are clearly separated
+    # from training records and don't sweep the full training-step range.
+    print("\nEvaluating trained model (1 sample per task) ...")
+    import contextlib
+    eval_seed_base = args.steps * 9999  # well outside training seeds
+    best_adv_reward: dict[int, float] = {}
+    worst_adv_reward: dict[int, float] = {}
 
-        for s in samples[:min(len(samples), 8)]:
-            inputs = tokenizer.apply_chat_template(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": s["prompt"]},
-                ],
-                tokenize=True, add_generation_prompt=True, return_tensors="pt",
+    for task_id in range(len(TASKS)):
+        seed = eval_seed_base + task_id
+        task = mutate_task(TASKS[task_id], seed=seed)
+        task["_mutation_seed"] = seed
+        prompt = _build_prompt(task)
+        inputs = tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            tokenize=True, add_generation_prompt=True, return_tensors="pt",
+        )
+        if _TORCH_AVAILABLE:
+            inputs = inputs.to(model.device)
+        with (torch.no_grad() if _TORCH_AVAILABLE else contextlib.nullcontext()):
+            out_ids = model.generate(
+                inputs, max_new_tokens=args.max_completion_len,
+                temperature=0.3, do_sample=True, pad_token_id=tokenizer.pad_token_id,
             )
-            if _TORCH_AVAILABLE:
-                inputs = inputs.to(model.device)
-            import contextlib
-            with (torch.no_grad() if _TORCH_AVAILABLE else contextlib.nullcontext()):
-                out_ids = model.generate(
-                    inputs, max_new_tokens=args.max_completion_len,
-                    temperature=0.3, do_sample=True, pad_token_id=tokenizer.pad_token_id,
-                )
-            raw = tokenizer.decode(out_ids[0][inputs.shape[-1]:], skip_special_tokens=True)
-            result = compute_reward(s["task"], raw, seed=s["seed"])
+        raw = tokenizer.decode(out_ids[0][inputs.shape[-1]:], skip_special_tokens=True)
+        result = compute_reward(task, raw, seed=seed)
 
-            issues_with_cls = sum(1 for iss in s["task"]["issues"] if "classification" in iss)
-            cls_acc = None
-            if issues_with_cls > 0:
-                comments, _ = _parse_output(raw)
-                correct_cls = 0
-                found_ids = result["issues_found"]
-                task_issue_map = {iss["id"]: iss for iss in s["task"]["issues"]}
-                for c in comments:
-                    for fid in found_ids:
-                        iss = task_issue_map.get(fid, {})
-                        expected = iss.get("classification")
-                        given = str(c.get("classification", "")).lower().replace("-", "_")
-                        if expected and given == expected.lower().replace("-", "_"):
-                            correct_cls += 1
-                            break
-                cls_acc = correct_cls / issues_with_cls
+        issues_with_cls = sum(1 for iss in task["issues"] if "classification" in iss)
+        cls_acc = None
+        if issues_with_cls > 0:
+            comments, _ = _parse_output(raw)
+            correct_cls = 0
+            found_ids = result["issues_found"]
+            task_issue_map = {iss["id"]: iss for iss in task["issues"]}
+            for c in comments:
+                for fid in found_ids:
+                    iss = task_issue_map.get(fid, {})
+                    expected = iss.get("classification")
+                    given = str(c.get("classification", "")).lower().replace("-", "_")
+                    if expected and given == expected.lower().replace("-", "_"):
+                        correct_cls += 1
+                        break
+            cls_acc = correct_cls / issues_with_cls
 
-            record = {
-                "step": step,
-                "task_id": s["task_id"],
-                "task_difficulty": s["task"]["difficulty"],
-                "phase": phase,
-                "reward_total": result["total"],
-                "issue_reward": result["issue_reward"],
-                "classification_reward": result["classification_reward"],
-                "false_positive_penalty": result["false_positive_penalty"],
-                "issue_coverage": result["issue_coverage"],
-                "classification_accuracy": cls_acc,
-                "backdoor_detected": result["backdoor_detected"],
-                "escalation_required": result["escalation_required"],
-                "decision": result["decision"],
-                "loss": loss,
-                "timestamp": time.time(),
-                "raw_output": raw,
-            }
-            logger.log(record)
+        record = {
+            "step": args.steps + task_id,  # clearly after training steps
+            "task_id": task_id,
+            "task_difficulty": task["difficulty"],
+            "phase": "eval",
+            "reward_total": result["total"],
+            "issue_reward": result["issue_reward"],
+            "classification_reward": result["classification_reward"],
+            "false_positive_penalty": result["false_positive_penalty"],
+            "issue_coverage": result["issue_coverage"],
+            "classification_accuracy": cls_acc,
+            "backdoor_detected": result["backdoor_detected"],
+            "escalation_required": result["escalation_required"],
+            "decision": result["decision"],
+            "loss": loss,
+            "timestamp": time.time(),
+            "raw_output": raw,
+        }
+        logger.log(record)
 
-            tid = s["task_id"]
-            if s["task"].get("escalation_required"):
-                r = result["total"]
-                if tid not in worst_adv_reward or r < worst_adv_reward[tid]:
-                    worst_adv_reward[tid] = r
-                    save_demo_trace(tid, s["prompt"], raw, result, "before")
-                if r > 0.5 and (tid not in best_adv_reward or r > best_adv_reward[tid]):
-                    best_adv_reward[tid] = r
-                    save_demo_trace(tid, s["prompt"], raw, result, "after")
+        if task.get("escalation_required"):
+            r = result["total"]
+            worst_adv_reward.setdefault(task_id, r)
+            save_demo_trace(task_id, prompt, raw, result, "before")
+            if r > 0.5:
+                best_adv_reward[task_id] = r
+                save_demo_trace(task_id, prompt, raw, result, "after")
 
     # -- Final plots & summary --------------------------------------------
     print("\nGenerating plots ...")
@@ -849,7 +871,7 @@ def main() -> None:
                         help="Learning rate")
     parser.add_argument("--max-seq-len", type=int, default=2048,
                         help="Max sequence length (prompt + completion)")
-    parser.add_argument("--max-completion-len", type=int, default=512,
+    parser.add_argument("--max-completion-len", type=int, default=768,
                         help="Max new tokens for model completion")
     parser.add_argument("--save-steps", type=int, default=40,
                         help="Save checkpoint every N steps")
