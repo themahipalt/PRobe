@@ -1,37 +1,21 @@
-# Environment variables
-.env
-
-# Python cache
+# Python
+.venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
-
-# Virtual environments
-.venv/
-venv/
-
-# Build artifacts
 *.egg-info/
-dist/
-build/
 
-# Logs
-*.log
+# uv
+.uv/
+uv.lock
 
-# OS files
+# VS Code / Visual Studio
+.vscode/
+.vs/
+*.db
+*.mpack
+
+# OS
 .DS_Store
 Thumbs.db
-
-# IDE / Editors
-.vscode/
-.idea/
-
-# Visual Studio (important for your earlier error)
-.vs/
-
-# ML / model artifacts (optional)
-checkpoints/
-*.safetensors
-
-# Claude (optional)
-.claude/
