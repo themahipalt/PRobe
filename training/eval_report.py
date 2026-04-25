@@ -178,7 +178,7 @@ def generate_report(before: dict, after: dict, output_dir: pathlib.Path) -> str:
 | **Avg Reward** | {before["overall_avg_reward"]:.4f} | {after["overall_avg_reward"]:.4f} | **{overall_improvement:+.2f}%** ✅ |
 | **Max Reward** | {before["max_reward"]:.4f} | {after["max_reward"]:.4f} | +{after["max_reward"] - before["max_reward"]:.4f} |
 | **Episodes** | {before.get("total_episodes", len(before["episodes"]))} | {after["total_episodes"]} | — |
-| **Final 10 Avg** | {before["overall_avg_reward"]:.4f} | {after["final_avg"]:.4f} | **{((after["final_avg"] - before["overall_avg_reward"]) / abs(before["overall_avg_reward"]) * 100):+.2f}%** |
+| **Final 10 Avg** | {before["overall_avg_reward"]:.4f} | {after["final_avg"]:.4f} | **{(((after["final_avg"] - before["overall_avg_reward"]) / abs(before["overall_avg_reward"]) * 100) if before["overall_avg_reward"] != 0 else 0):+.2f}%** |
 
 ### 📈 Per-Task Breakdown
 
