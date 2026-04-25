@@ -19,3 +19,6 @@ uv.lock
 # OS
 .DS_Store
 Thumbs.db
+
+# Training/runtime caches
+.mplconfig/

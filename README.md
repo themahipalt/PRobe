@@ -375,6 +375,9 @@ The dashboard makes the reward signal **tangible** — a visitor can play one ep
 | **Curriculum** | 5 phases: ultra-easy → easy → medium/hard → causal chain → adversarial |
 
 ```bash
+# Install training dependencies (works on Kaggle/Colab too)
+pip install -e ".[training]"
+
 # Full training — Unsloth 4-bit (recommended, single T4/A10)
 uv run python training/train_grpo.py --model Qwen/Qwen2.5-1.5B-Instruct --use-unsloth
 
