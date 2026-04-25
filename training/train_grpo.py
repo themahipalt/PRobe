@@ -900,9 +900,9 @@ def main() -> None:
                         help="Total GRPO training steps")
     parser.add_argument("--group-size", type=int, default=4,
                         help="GRPO group size (completions per prompt)")
-    parser.add_argument("--batch-size", type=int, default=2,
+    parser.add_argument("--batch-size", type=int, default=4,
                         help="Per-device train batch size")
-    parser.add_argument("--grad-accum", type=int, default=4,
+    parser.add_argument("--grad-accum", type=int, default=2,
                         help="Gradient accumulation steps")
     parser.add_argument("--lr", type=float, default=5e-6,
                         help="Learning rate")
