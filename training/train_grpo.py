@@ -716,6 +716,7 @@ def train(args: argparse.Namespace) -> None:
     # whose prompts share an identical ~130-char opening.
     # NOTE: Keep this numeric so Accelerate can collate it into tensors.
     _current_task_map: dict[int, dict] = {}  # sample_id(int) -> task dict
+    _current_prompt_map: dict[str, dict] = {}  # full prompt text -> task dict
 
     def _curriculum_generator():
         """
@@ -781,6 +782,7 @@ def train(args: argparse.Namespace) -> None:
 
     rows: list[dict[str, Any]] = []
     _current_task_map.clear()
+    _current_prompt_map.clear()
     base_step = int(_curriculum_state["step"])
 
     for idx in range(n_prompts):
@@ -796,6 +798,7 @@ def train(args: argparse.Namespace) -> None:
 
         sample_id = int(seed)
         _current_task_map[sample_id] = task
+        _current_prompt_map[prompt_text] = task
 
         enc = tokenizer(
             prompt_text,
@@ -838,6 +841,10 @@ def train(args: argparse.Namespace) -> None:
             except (TypeError, ValueError):
                 sample_id_int = None
             task = _current_task_map.get(sample_id_int) if sample_id_int is not None else None
+            # Fallback: some TRL versions don't forward custom columns into reward kwargs.
+            # In that case we map using the exact prompt text (which GRPOTrainer provides).
+            if task is None and isinstance(prompt, str):
+                task = _current_prompt_map.get(prompt)
             if task is None:
                 log.warning("grpo_reward_fn: task lookup miss for sample_id=%r", sample_id)
                 rewards.append(0.0)
@@ -887,7 +894,7 @@ def train(args: argparse.Namespace) -> None:
             inputs = inputs.to(model.device)
         with (torch.no_grad() if _TORCH_AVAILABLE else contextlib.nullcontext()):
             out_ids = model.generate(
-                inputs, max_new_tokens=args.max_completion_len,
+                **inputs, max_new_tokens=args.max_completion_len,
                 temperature=0.3, do_sample=True, pad_token_id=tokenizer.pad_token_id,
             )
         raw = tokenizer.decode(out_ids[0][inputs.shape[-1]:], skip_special_tokens=True)
