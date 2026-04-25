@@ -185,6 +185,43 @@ def _build_prompt(task: dict[str, Any], context_hints: list[str] | None = None) 
 # Reward function — operates on raw model output string
 # ---------------------------------------------------------------------------
 
+def _extract_json_array(raw: str) -> str | None:
+    """
+    Return the outermost JSON array substring in *raw*, or None.
+
+    A regex like ``\\[.*?\\]`` cuts on the first ``]`` it sees, which
+    truncates valid arrays whose strings contain brackets (e.g. ``"arr[0]"``).
+    This walks the text with bracket-depth tracking, ignoring brackets that
+    appear inside JSON string literals.
+    """
+    start = raw.find("[")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return raw[start : i + 1]
+    return None
+
+
 def _parse_output(raw: str) -> tuple[list[dict], str | None]:
     """
     Parse model output into (comments_list, decision_string).
@@ -202,12 +239,12 @@ def _parse_output(raw: str) -> tuple[list[dict], str | None]:
     if decision_match:
         decision = decision_match.group(1).lower()
 
-    # Extract JSON array — find first [ ... ] block
+    # Extract JSON array — bracket-depth aware, string-aware.
     comments: list[dict] = []
-    arr_match = re.search(r"\[.*?\]", raw, re.DOTALL)
-    if arr_match:
+    arr_text = _extract_json_array(raw)
+    if arr_text is not None:
         try:
-            parsed = json.loads(arr_match.group(0))
+            parsed = json.loads(arr_text)
             if isinstance(parsed, list):
                 comments = [c for c in parsed if isinstance(c, dict)]
         except json.JSONDecodeError:

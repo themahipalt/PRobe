@@ -48,7 +48,7 @@ except ImportError:
             spec.loader.exec_module(module)  # type: ignore[union-attr]
             return module
 
-        _grader_module = _load_module("grader")
+        _grader_module = _load_module("graders")
         _mutator_module = _load_module("mutator")
         _tasks_module = _load_module("tasks")
         _memory_module = _load_module("episode_memory")

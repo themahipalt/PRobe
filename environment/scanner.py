@@ -21,6 +21,7 @@ still call ADD_COMMENT with the correct line + keyword to earn reward.
 from __future__ import annotations
 
 import random
+import zlib
 from typing import Any
 
 # XOR mask keeps the scanner RNG independent from the mutation-engine RNG
@@ -272,9 +273,12 @@ def _build_issue_message(issue: dict[str, Any]) -> str:
 
     # Use a separate RNG seeded on the issue id so this issue always maps to
     # the same scanner message regardless of evaluation order or FP count.
-    # Using the main rng here would make messages shift whenever recall draws
-    # change, which breaks the reproducibility guarantee.
-    issue_rng = random.Random(hash(issue.get("id", "")) & 0xFFFF)
+    # zlib.crc32 instead of builtin hash(): hash() of strings is salted with a
+    # per-process random value (PEP 456), so the same issue id would produce
+    # different messages across Python invocations, breaking the module's
+    # reproducibility-from-seed contract.
+    issue_id = issue.get("id", "")
+    issue_rng = random.Random(zlib.crc32(issue_id.encode("utf-8")))
     return suffix_prefix + issue_rng.choice(message_pool)
 
 

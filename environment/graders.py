@@ -44,7 +44,7 @@ DECISION_COVERAGE_GATE: float = 0.30 # min weighted coverage to earn the decisio
 EFFICIENCY_POOL: float = 0.10        # max terminal efficiency bonus
 COVERAGE_THRESHOLD: float = 0.60     # min coverage to unlock efficiency bonus
 FALSE_POSITIVE_PENALTY: float = -0.05  # per substantive comment that matched no issue
-MISSCLASSIFY_PENALTY: float = -0.05    # correct issue found but wrong classification label
+MISCLASSIFY_PENALTY: float = -0.05     # correct issue found but wrong classification label
 FORMAT_BONUS: float = 0.02             # awarded once for a valid non-empty JSON array
 
 # Type alias for the per-component score breakdown returned by score_comment.
