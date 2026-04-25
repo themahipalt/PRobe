@@ -1,0 +1,31 @@
+{
+  "agent": "random",
+  "episodes": [
+    {"reward": 0.0, "task_id": 0, "steps": 5},
+    {"reward": 0.0, "task_id": 1, "steps": 5},
+    {"reward": 0.0, "task_id": 2, "steps": 5}
+  ],
+  "by_task": {
+    "task_0": {
+      "episodes": 17,
+      "avg_reward": 0.0,
+      "max_reward": 0.0,
+      "min_reward": 0.0
+    },
+    "task_1": {
+      "episodes": 17,
+      "avg_reward": 0.0,
+      "max_reward": 0.0,
+      "min_reward": 0.0
+    },
+    "task_2": {
+      "episodes": 16,
+      "avg_reward": 0.0,
+      "max_reward": 0.0,
+      "min_reward": 0.0
+    }
+  },
+  "overall_avg_reward": 0.0,
+  "max_reward": 0.0,
+  "min_reward": 0.0
+}
