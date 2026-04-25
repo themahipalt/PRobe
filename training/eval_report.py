@@ -68,10 +68,10 @@ def run_random_baseline(num_episodes: int = 50) -> dict[str, Any]:
                     action_type=ActionType.SUBMIT_REVIEW,
                 )
 
-            obs, reward, done, info = env.step(action)
+            obs = env.step(action)
 
-            if done:
-                reward_val = reward.total if hasattr(reward, "total") else reward
+            if obs.done:
+                reward_val = obs.reward.total if hasattr(obs.reward, "total") else obs.reward
                 results["episodes"].append({
                     "reward": reward_val,
                     "task_id": task_id,
