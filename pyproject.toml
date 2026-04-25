@@ -29,6 +29,23 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.0.0",
 ]
+training = [
+    # GRPO training stack (used by training/train_grpo.py)
+    "torch",
+    "transformers",
+    "trl>=0.12",
+    "datasets",
+    "accelerate",
+    "peft",
+    # Optional but commonly needed for 4-bit fine-tuning
+    "bitsandbytes",
+    # Optional (plots); script degrades gracefully if missing
+    "matplotlib",
+]
+unsloth = [
+    # Optional accelerator for 4-bit LoRA; install only when supported on the platform.
+    "unsloth",
+]
 
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server

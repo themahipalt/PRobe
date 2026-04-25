@@ -56,6 +56,12 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Matplotlib cache dir (Kaggle/containers often have unwritable $HOME)
+# Must be set before importing matplotlib.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("MPLCONFIGDIR", str(pathlib.Path.cwd() / ".mplconfig"))
+
+# ---------------------------------------------------------------------------
 # Path bootstrap — works whether installed as package or run bare
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -730,6 +736,8 @@ def train(args: argparse.Namespace) -> None:
                 prompt_text = f"{SYSTEM_PROMPT}\n\n{s['prompt']}"
                 yield {
                     "prompt": prompt_text,
+                    # Pass-through column used by grpo_reward_fn() for task lookup.
+                    "sample_id": s["_sample_id"],
                 }
             local_step += 1
             _curriculum_state["step"] = local_step
