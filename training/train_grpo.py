@@ -732,10 +732,6 @@ def train(args: argparse.Namespace) -> None:
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": s["prompt"]},
                     ],
-                    "task_id": s["task_id"],
-                    "seed": s["seed"],
-                    # Pass sample_id through so the reward callback can look up the task.
-                    "sample_id": s["_sample_id"],
                 }
             local_step += 1
             _curriculum_state["step"] = local_step
