@@ -728,10 +728,7 @@ def train(args: argparse.Namespace) -> None:
                 _current_task_map[sample_id] = s["task"]
             for s in samples:
                 yield {
-                    "prompt": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": s["prompt"]},
-                    ],
+                    "prompt": f"{SYSTEM_PROMPT}\n\n{s['prompt']}",
                 }
             local_step += 1
             _curriculum_state["step"] = local_step
