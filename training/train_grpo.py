@@ -768,7 +768,6 @@ def train(args: argparse.Namespace) -> None:
     trainer = GRPOTrainer(
         model=model,
         args=grpo_config,
-        tokenizer=tokenizer,
         train_dataset=train_dataset,
         reward_funcs=grpo_reward_fn,
     )
