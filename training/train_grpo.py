@@ -58,7 +58,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Path bootstrap — works whether installed as package or run bare
 # ---------------------------------------------------------------------------
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from environment.tasks import TASKS
 from environment.graders import (
