@@ -266,7 +266,34 @@ So in SaaS, the true art is not just *using* RL. It is choosing **the right rewa
 
 ---
 
-## 9. Conclusion
+## 9. Tech used in my model (what I shipped on Hugging Face)
+
+This post explains RL in plain language. Here is the *engineering reality* behind the model I published:
+
+- **Base model**: `Qwen/Qwen2.5-1.5B-Instruct` (a strong small instruction-tuned LLM)
+- **Training signal**: **GRPO** (Group Relative Policy Optimization) via **Hugging Face TRL**
+- **Efficient fine-tuning**: **LoRA / PEFT** (small adapter weights instead of rewriting the whole 1.5B model)
+- **Where the “world” comes from**: this repository is an **OpenEnv** environment (`openenv-core`), and the training script (`training/train_grpo.py`) turns environment interactions into the prompts/rewards GRPO needs
+- **Python training dependencies (the boring truth)**: `torch`, `transformers`, `trl`, `datasets`, `accelerate`, `peft` (and optionally `bitsandbytes` / **Unsloth** for 4-bit setups when your hardware supports it)
+- **Artifacts**: uploaded to Hugging Face Hub as a model repo you can download like any other Transformers model
+- **Inference stack**: **Transformers + Accelerate** (`device_map="auto"` on GPU when available)
+
+You can browse the published adapter repo here:
+
+- [`mahithakur/codereview-grpo-1.5b`](https://huggingface.co/mahithakur/codereview-grpo-1.5b)
+
+### What “downloading my model” actually does
+When you run `from_pretrained("mahithakur/codereview-grpo-1.5b")`, Hugging Face Hub sends files like `adapter_config.json` and `adapter_model.safetensors`. That means:
+
+- you are not necessarily downloading a full new 1.5B copy labeled “mine”
+- you are downloading a **small adapter** that **modifies** the base Qwen weights at runtime
+
+### A practical inference note (so you don’t chase ghosts)
+If you use **greedy decoding** (`do_sample=False`), settings like `temperature`, `top_p`, and `top_k` are often **ignored**—that’s normal. For JSON-style outputs, greedy decoding + a strict prompt + a JSON parse check is usually the simplest first pass.
+
+---
+
+## 10. Conclusion
 
 Reinforcement Learning is not magic. It is patience, repeated.
 
