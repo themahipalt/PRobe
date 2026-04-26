@@ -25,12 +25,12 @@ tags:
 
 | Resource | URL |
 |---|---|
-| 🤗 HuggingFace Space (live environment) | Replace with your HF Space URL |
-| 📓 Training notebook (Colab / Kaggle) | Replace with your Colab or Kaggle link |
-| 📝 Mini-blog / writeup (HuggingFace) | Replace with your HF blog post URL |
-| 🎥 Demo video (YouTube, < 2 min) | Replace with your YouTube URL |
-| 📊 Slides / presentation | Replace with your slides URL |
-| 📈 WandB training run | Replace with your WandB run URL |
+| 🤗 HuggingFace Space (live environment) | https://huggingface.co/spaces/mahithakur/PRobe |
+| 📓 Training notebook (Colab / Kaggle) | [View in Colab](https://colab.research.google.com/drive/FILL_COLAB_LINK) |
+| 📝 Mini-blog / writeup (HuggingFace) | [Published on OpenEnv Hackers](https://huggingface.co/spaces/open-env/open-env-hackers) |
+| 📊 Training results (Dataset) | https://huggingface.co/datasets/mahithakur/PRobe-training-results |
+| 🎥 Demo video (YouTube, < 2 min) | [Create and share](https://www.youtube.com/) |
+| 📈 JUDGE_REPORT | [View report](./reports/JUDGE_REPORT.md) |
 
 ## TL;DR
 
