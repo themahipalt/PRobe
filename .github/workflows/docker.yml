@@ -1,0 +1,19 @@
+name: Docker build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  dockerfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (root Dockerfile)
+        run: docker build -t probe:root .
+
+      - name: Build image (environment/Dockerfile)
+        run: docker build -f environment/Dockerfile -t probe:env .
