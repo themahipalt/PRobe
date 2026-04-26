@@ -66,6 +66,19 @@ os.environ.setdefault("MPLCONFIGDIR", str(pathlib.Path.cwd() / ".mplconfig"))
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
+try:
+    import openenv  # noqa: F401 — OpenEnv runtime (PyPI: openenv-core)
+except ModuleNotFoundError as _e:
+    if getattr(_e, "name", None) == "openenv":
+        print(
+            "Missing OpenEnv runtime (import 'openenv'). From the repository root run:\n"
+            '  pip install -e ".[training]"\n'
+            "or install the runtime only:\n"
+            '  pip install "openenv-core[core]>=0.2.2"\n',
+            file=sys.stderr,
+        )
+    raise
+
 from environment.tasks import TASKS
 from environment.graders import (
     CodeReviewGrader,
@@ -692,6 +705,24 @@ def train(args: argparse.Namespace) -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # -- GRPOConfig --------------------------------------------------------
+    # TRL defaults can enable bf16, which crashes on CPU-only runtimes.
+    # Auto-detect hardware and pick a safe dtype configuration.
+    use_cpu = True
+    bf16 = False
+    fp16 = False
+    if _TORCH_AVAILABLE:
+        try:
+            use_cpu = not bool(torch.cuda.is_available())
+            if not use_cpu:
+                # Prefer bf16 when supported, else fp16.
+                bf16 = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+                fp16 = not bf16
+        except Exception:
+            # Conservative fallback: CPU-safe.
+            use_cpu = True
+            bf16 = False
+            fp16 = False
+
     grpo_config = GRPOConfig(
         output_dir=str(OUTPUTS_DIR),
         num_train_epochs=1,
@@ -707,6 +738,9 @@ def train(args: argparse.Namespace) -> None:
         seed=42,
         remove_unused_columns=False,
         max_steps=args.steps,
+        use_cpu=use_cpu,
+        bf16=bf16,
+        fp16=fp16,
     )
 
     # -- Curriculum state shared via closure --------------------------------

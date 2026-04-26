@@ -1,339 +1,285 @@
 ---
-title: "Can an AI Actually *Investigate* Code — or Just Scan It?"
+title: "Reinforcement Learning, Explained Simply: How Machines Learn by Trying"
 thumbnail: /blog/assets/probe/thumbnail.png
 authors:
   - user: <!-- FILL: your-hf-username -->
 ---
 
-# Can an AI Actually *Investigate* Code — or Just Scan It?
+# Reinforcement Learning, Explained Simply: How Machines Learn by Trying
 
-> **PRobe** is an RL training environment that teaches language models to do
-> what no linter can: read a pull request, pinpoint deliberate backdoors,
-> and decide when to escalate to a security team — all without an LLM judge.
+Let me begin with a small story.
 
-<!-- FILL: embed a GIF or screenshot of the live dashboard here -->
-<!-- ![PRobe dashboard](assets/probe/dashboard.gif) -->
+You’re learning to ride a bicycle. No one can truly *explain balance* to your muscles. You wobble, you fall, you adjust. A gentle success—two seconds longer without tipping—feels like a reward. A mistake—leaning too hard—feels like a penalty. After enough tries, your body discovers a strategy that words alone could never teach.
 
----
+That quiet loop—**try → feel outcome → adjust → try again**—is the heart of Reinforcement Learning.
 
-## TL;DR
-
-We built **PRobe** — a reinforcement-learning environment where an AI agent learns to review Python code the way a senior security engineer would.
-The agent reads a pull request, flags bugs line-by-line, decides whether each flaw is an honest mistake or a deliberate attack, and knows when to escalate.
-Our fully deterministic reward function requires no LLM judge: keyword spam scores *negative*, careful reading scores close to `+1.0`.
-A scripted "perfect oracle" agent scores **+0.778** on average; a random agent scores **−0.260** — the gap the trained model has to close.
+In this post, I’ll explain Reinforcement Learning (RL) in simple English, like I’m speaking to a curious friend—not to a textbook.
 
 ---
 
-## The Problem (Why This Environment?)
+## 1. Hook (Story-Based Introduction)
 
-Imagine you are the only security engineer at a fast-moving startup.
-On Monday morning you open GitHub and find 47 open pull requests.
-Most are routine changes — a new endpoint, a refactored helper, a dependency bump.
-But one of them hides a backdoor: a two-line change that lets any request bypass authentication if a specific hidden header is present.
-It looks completely legitimate. It passed CI. It was submitted by someone with a plausible GitHub profile.
+Think about how we become good at anything that matters:
 
-This is not a hypothetical.
-The **XZ Utils backdoor** (CVE-2024-3094) hid in plain sight for two years of open-source review.
-The **SolarWinds breach** compromised 18,000 organisations through a tampered build pipeline that looked like a routine update.
-In both cases the malicious change *looked* like a normal contribution.
+- We **act** (say something, choose something, attempt something)
+- The world **responds**
+- We **learn** from the response
 
-Today's AI coding assistants are great at *generating* code.
-They are much weaker at *evaluating* it — reasoning about intent, distinguishing an honest off-by-one from a planted authentication bypass, or knowing when the right answer is "stop and call the security team."
-Reward signals for code generation are everywhere; reward signals for critical code *evaluation* barely exist.
+Even when the feedback is subtle, our behavior slowly changes. We learn the shape of the world by bumping into it.
 
-PRobe is our attempt to close that gap.
+Reinforcement Learning is the same idea—but for machines.
 
 ---
 
-## Meet the Environment
+## 2. What is Reinforcement Learning?
 
-### Plain English First
+**Reinforcement Learning is a way for a computer to learn by doing.**
 
-The agent is handed a Python source file and a brief: *"Review this module. Flag every bug. Decide whether to request changes or escalate to security."*
-On every new episode, the code surface changes slightly — variable names are renamed, line numbers shift, constants are tweaked — so the agent cannot memorise answers.
-It has to actually read.
+Instead of learning from a big list of correct answers (like a typical school exam), an RL system learns like a person in the real world:
 
-The agent can:
-- **Leave comments** on specific lines (like a human reviewer adding inline notes)
-- **Probe for more context** around a suspicious region
-- **Run a simulated scanner** (which, like real tools, misses ~30 % of issues and occasionally cries wolf)
-- **Submit a verdict**: request changes, approve, or escalate to a security team
+- It tries something
+- It gets a score (good or bad)
+- It tries again, aiming to score better next time
 
-At the end of each episode the reward function totals up how well the agent read the code.
+That’s it.
 
-### Observation → Agent → Action → Reward
+If you remember only one line, remember this:
 
-```
-┌──────────────────────────────────────────────────────┐
-│  OBSERVATION (what the agent sees each step)         │
-│  • Mutated Python source code                        │
-│  • Review instructions + file name                   │
-│  • History of actions taken so far                   │
-│  • Steps remaining, issues found so far              │
-│  • Causal hints (unlocked by finding key issues)     │
-└──────────────────┬───────────────────────────────────┘
-                   │
-                   ▼
-           ┌───────────────┐
-           │  LLM  Agent   │
-           └───────┬───────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────────────┐
-│  ACTION (one per step)                               │
-│  add_comment │ get_context │ run_scanner             │
-│  request_changes │ approve │ escalate_to_security    │
-└──────────────────┬───────────────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────────────┐
-│  REWARD  (deterministic, no LLM judge)               │
-│  +credit for finding real issues at correct lines    │
-│  −penalty for spam, false positives, wrong decision  │
-└──────────────────┬───────────────────────────────────┘
-                   │
-                   ▼
-           Next Observation
-```
-
-### Difficulty Tiers (10 Tasks Total)
-
-| Tier | Example Task | What Makes It Hard |
-|---|---|---|
-| **Ultra-Easy** (T0) | Off-by-one + hardcoded credential, *hinted in the comments above each bug* | Nothing — it's a bootstrapper so GRPO sees positive reward from step one |
-| **Easy** (T1) | Three logic bugs in a utility module | No hints; agent must read carefully |
-| **Medium** (T2) | SQL injection, MD5 password hash, `eval()` call, hardcoded DB creds | Wider code surface; 5 issues spread across the file |
-| **Hard** (T6) | JWT forgery → privilege escalation *causal chain* | Finding the first issue unlocks a new hint that reveals the second |
-| **Adversarial** (T9) | Import-hook that silently exfiltrates env-vars to an attacker's domain | Agent must classify it as *intentional* AND escalate — `request_changes` is wrong even if it finds the bug |
+> **RL is learning through consequences.**
 
 ---
 
-## Designing the Reward Function
+## 3. Why Reinforcement Learning Matters
 
-A reward function is the score the agent gets for each action — it's how the environment teaches the model what "good" means.
-We spent significant time on ours, because the obvious designs are easy to game.
+Traditional machine learning often looks like this:
 
-### What "Success" Looks Like
+- “Here is the input.”
+- “Here is the correct output.”
+- “Learn the mapping.”
 
-A perfect episode: the agent reads the code, annotates every real issue at the exact line with a substantive, keyword-bearing comment, correctly labels each as an accidental bug or a deliberate backdoor, and submits the right verdict with steps to spare.
-Score approaches **+1.0**.
+But real life rarely gives us perfect labels.
 
-A failing episode: the agent dumps every security buzzword ("SQL injection, buffer overflow, RCE, XSS…") onto random lines, never co-locates a keyword with an actual issue, and submits the wrong verdict.
-Score approaches **−1.0**.
+In many important problems, the best answer depends on:
 
-### The Three-Gate Verifier
+- **long-term effects** (what happens later, not immediately)
+- **interaction** (the system changes the world, and the world changes back)
+- **trade-offs** (fast vs safe, cheap vs high quality, short-term vs long-term)
 
-A comment earns issue credit only when **all three** conditions hold at once:
-
-1. **Keyword hit** — at least one issue-specific keyword appears in the comment text
-2. **Line hit** — the line number is within ±2 of the declared issue range
-3. **Substantive** — the comment is longer than 15 characters
-
-This closes three common reward-hacking paths:
-
-| Exploit Attempt | Gate It Fails |
-|---|---|
-| Dump all security keywords at line 9999 | Line hit |
-| Comment on the right line with "bad" | Substantive |
-| Write a long, relevant comment on line 1 for every task | Keyword hit |
-
-### Reward Components
-
-| Component | Weight | When It Triggers |
-|---|---|---|
-| Issue credit | up to **+0.40** | Comment passes all three gates |
-| Classification credit | up to **+0.20** | Correct `accidental_bug` / `intentional_backdoor` label |
-| Misclassify penalty | **−0.05** | Issue found but labelled wrong |
-| False positive penalty | **−0.05** | Substantive comment, no issue matched |
-| Coverage bonus | up to **+0.15** | Proportional to fraction of issues found |
-| Decision score | **±0.15** | Correct vs. wrong terminal action |
-| Efficiency bonus | up to **+0.10** | Finishing early (only unlocked at ≥ 60 % coverage) |
-
-### A Step-by-Step Reward Example
-
-> **Task:** `auth.py` — SQL injection at line 12, hardcoded credential at line 3.
-
-1. Agent calls `add_comment(line=12, comment="Unparameterised query allows SQL injection via username field", category="security")` → passes all three gates → **+0.20 issue credit**
-2. Agent calls `add_comment(line=3, comment="Hardcoded DB password in source", category="security", classification="accidental_bug")` → issue credit **+0.20** + classification credit **+0.10**
-3. Agent calls `request_changes()` → correct terminal action for a non-adversarial task → **+0.15 decision score** + small coverage + efficiency bonuses
-4. **Total: ~+0.78**
+RL matters because it’s designed for exactly these kinds of problems—where decisions are *lived* through time.
 
 ---
 
-## The Agent & Baseline
+## 4. Core Concepts (Simplified)
 
-### Scripted Baselines (Reward Validation)
+RL sounds complicated because of the vocabulary. But the ideas are simple.
 
-Before touching any ML, we ran four scripted agents to validate the reward function:
+### Agent
+The **agent** is the learner.
 
-```python
-# Perfect oracle — reads ground-truth issue data
-oracle.add_comment(line=issue.line, comment=issue.keywords[0] + " vulnerability detected here", ...)
-oracle.escalate_to_security_review()   # only on adversarial tasks
+Think: a delivery app brain, a game-playing bot, a robot, or any decision-maker.
 
-# Keyword spammer — tries to game the reward
-for kw in ALL_SECURITY_KEYWORDS:
-    spammer.add_comment(line=9999, comment=kw)   # wrong line every time
+### Environment
+The **environment** is the world the agent lives in.
 
-# Line flooder — comments on every 5th line
-for line in range(5, max_lines, 5):
-    flooder.add_comment(line=line, comment="potential issue here, review carefully")
-```
+It could be:
 
-| Agent | Mean Reward | What It Proves |
-|---|---|---|
-| **Perfect Oracle** | **+0.778** | Upper bound — the reward is achievable |
-| Line Flooder | −0.025 | Wide-net fishing doesn't work |
-| Keyword Spammer | −0.075 | Buzzword dumps don't work |
-| Random Agent | −0.260 | Lower bound for comparison |
+- a game board
+- a road for driving
+- a food app screen
+- a simulated world inside a computer
 
-Both exploit strategies score less than −3 % of oracle reward. ✅
+### Actions
+**Actions** are the choices the agent can make.
 
-### Zero-Shot LLM Baseline
+Examples:
 
-We ran `gpt-4o-mini` with a system prompt asking it to review the code and call the environment's actions.
+- “Recommend this restaurant”
+- “Turn left”
+- “Jump now”
+- “Wait”
 
-<details>
-<summary>System prompt (simplified)</summary>
+### Rewards
+A **reward** is feedback.
 
-```
-You are a senior security engineer reviewing a Python pull request.
-You have access to the following tools:
-- add_comment(line, comment, category, severity, classification)
-- get_context(line)
-- run_scanner()
-- request_changes() / approve() / escalate_to_security_review()
+- Good outcome? Reward goes up.
+- Bad outcome? Reward goes down.
 
-Review the provided code carefully. Flag every real issue at the correct
-line with a specific, substantive comment. On adversarial tasks, classify
-each issue as accidental_bug or intentional_backdoor and escalate if the
-code contains a deliberate attack.
-```
-</details>
+Rewards don’t need to be perfect. They just need to *point* toward what we want.
 
-**Example trajectory — Task 2 (`auth.py`, medium difficulty):**
+### Policy
+A **policy** is simply the agent’s “habit” or “strategy.”
 
-<details>
-<summary>Agent saw → decided → got reward</summary>
+It answers the question:
 
-```
-Step 1  get_context(line=12)        → reveals f-string SQL query
-        reward = 0.00               (context action, no reward)
+> “Given what I see right now, what should I do next?”
 
-Step 2  add_comment(
-          line=12,
-          comment="Direct string interpolation in SQL query — classic injection vector",
-          category="security",
-          classification="accidental_bug"
-        )                           → keyword hit ✓, line hit ✓, substantive ✓
-        reward = +0.20 (issue) + 0.10 (classification)
-
-Step 3  add_comment(
-          line=3,
-          comment="DB_PASS hardcoded — rotate and move to env var",
-          category="security"
-        )                           → reward = +0.20
-
-Step 4  request_changes()           → correct terminal action
-        reward = +0.15 (decision) + coverage + efficiency bonuses
-
-Total episode reward: ~+0.72
-```
-</details>
-
-### GRPO Training
-
-We trained using **GRPO** (Group Relative Policy Optimisation) — an algorithm well-suited to environments where the agent produces a sequence of tool calls and gets a scalar reward at the end.
-The training follows a 5-phase curriculum that starts on the ultra-easy bootstrap task and gradually adds harder and adversarial tasks.
-
-```python
-CURRICULUM = [
-    (0,  40,  [0, 1]),          # Phase 0: ultra-easy + easy
-    (40, 80,  [0, 1, 2, 3]),    # Phase 1: adds medium/hard
-    (80, 120, list(range(7))),  # Phase 2: adds causal chain
-    (120,160, list(range(9))),  # Phase 3: adds adversarial
-    (160,200, list(range(10))), # Phase 4: full curriculum
-]
-```
+Over time, RL is basically trying to build a better and better policy.
 
 ---
 
-## Results
+## 5. Real-World Examples
 
-> **Headline:** <!-- FILL after training: e.g. "After 200 GRPO steps, the trained agent reached +0.XX mean reward — XX% of oracle ceiling — vs. −0.260 for the random baseline." -->
+Here are practical examples where RL ideas show up.
 
-### Reward by Difficulty Tier
+### Food delivery recommendations (Swiggy/Zomato style)
+Imagine an app deciding what to show you.
 
-<!-- FILL: embed outputs/training_curves.png after training -->
-<!-- ![Training curves](outputs/training_curves.png) -->
-<!-- *Mean episode reward vs. training step. Smoothed over a 10-step window.* -->
+If it recommends a restaurant and you:
 
-| Tier | Random Baseline | Oracle Ceiling | Trained Agent |
-|---|---|---|---|
-| Ultra-easy | −0.260 | +0.787 | <!-- FILL --> |
-| Easy | −0.260 | +0.800 | <!-- FILL --> |
-| Medium | −0.260 | +0.795 | <!-- FILL --> |
-| Hard | −0.260 | +0.800 | <!-- FILL --> |
-| Adversarial | −0.260 | +1.000 | <!-- FILL --> |
+- click it
+- order from it
+- rate it well
 
-### Where the Agent Consistently Struggled
+That’s a reward signal.
 
-<!-- FILL: update after training with real failure modes observed -->
+Over time, the app learns:
 
-From the scripted baselines and zero-shot runs, we already know the hardest failure modes:
+- what you like now
+- what you might like next
+- what keeps you coming back
 
-- **Adversarial classification** — correctly finding a backdoor but labelling it `accidental_bug` instead of `intentional_backdoor` costs 0.05 per issue and loses the classification credit
-- **Causal chains** — Task 6 requires finding the JWT secret *first* to unlock the hint that reveals the privilege escalation path; agents that skip `get_context` miss this entirely
-- **False positives under pressure** — agents near their step budget sometimes spam comments hoping to find issues, racking up −0.05 FP penalties instead
+This is not only about prediction—it’s about **decisions that change behavior**.
 
----
+### Game playing AI
+Games are perfect RL playgrounds because:
 
-## What We Learned
+- actions are clear
+- rules are consistent
+- rewards can be defined (win/lose/score)
 
-- **Reward design is the hard part.** Our first reward was purely binary (found-all-issues or not). The agent learned nothing for 50 steps. Adding partial credit for individual issue hits unlocked learning immediately.
+That’s why RL became famous with systems that learn to play games at very high levels.
 
-- **The three-gate verifier was essential.** Without the line-hit gate, keyword-spamming was profitable. Without the substantive gate, single-word comments gamed the keyword hit. All three gates are needed simultaneously.
+### Self-driving systems
+A self-driving system must constantly choose:
 
-- **The curriculum matters more than we expected.** Starting GRPO on medium-difficulty tasks produced flat reward curves. Routing the first 40 steps through the ultra-easy bootstrap task (with issue keywords literally hinted in the code comments) gave the model enough positive trajectories to bootstrap policy improvement.
+- speed up or slow down
+- change lanes or stay
+- yield or proceed
 
-- **Adversarial tasks are a qualitatively different capability.** `request_changes` and `escalate_to_security_review` look the same to a model that doesn't understand intent. The classification label (`intentional_backdoor`) is the signal that bridges them — and it only earns credit if the issue was actually found first.
+The reward isn’t just “arrive fast.” It must include:
 
-- **The live dashboard made iteration 10× faster.** Watching a model spam comments and collect −0.05 penalties in real time — with the reward ring turning red — made reward-function bugs obvious in seconds instead of minutes of log parsing.
+- safety
+- comfort
+- traffic rules
 
----
+RL is useful because driving is a long chain of decisions, not a single prediction.
 
-## Try It Yourself
+### Personalization systems
+Personalization is a living conversation:
 
-```bash
-# Clone and install (requires Python 3.10+ and uv)
-git clone <!-- FILL: https://github.com/your-org/probe -->
-cd probe
-uv sync
+- the system suggests
+- you react
+- the system updates
 
-# Start the server + browser UI in one command
-uv run python run.py
-# → open http://localhost:8000/ui/
-```
-
-| Resource | Link |
-|---|---|
-| 📓 Training notebook (Colab) | <!-- FILL: add Colab URL --> |
-| 🤗 Live environment (HF Spaces) | <!-- FILL: add HF Space URL --> |
-| 📄 OpenEnv manifest | [`openenv.yaml`](openenv.yaml) |
-| 🔬 Reward grader tests | [`tests/test_grader.py`](tests/test_grader.py) |
+RL thinking helps because the “best choice” is often the one that improves your long-term experience, not just your next click.
 
 ---
 
-## What's Next
+## 6. How RL Works (Intuition, Not Math)
 
-The ten tasks in PRobe are a starting point, not a ceiling.
-We want to add multi-file reviews (where the backdoor only becomes visible when two files are read together), multi-agent variants (one agent reviews, another tries to sneak in the backdoor), and a harder curriculum drawn from real CVE patches.
-If you work on code security, LLM evaluation, or RL environments — open an issue or send a PR. We'd love collaborators.
+Here’s the RL loop in plain steps:
+
+1. **The agent looks around**
+   - It observes the situation (screen, state, context).
+
+2. **The agent acts**
+   - It takes one action from the available choices.
+
+3. **The environment responds**
+   - The world changes (new screen, new position, new situation).
+
+4. **The agent receives a reward**
+   - A number that says: “That was good” or “That was bad.”
+
+5. **The agent updates its policy**
+   - It slowly learns what actions tend to lead to better outcomes.
+
+6. **Repeat**
+   - Thousands, millions, sometimes billions of times—especially in simulation.
+
+If supervised learning is like studying from an answer key, RL is like training for a sport:
+
+- practice
+- feedback
+- better practice
 
 ---
 
-## Acknowledgments
+## 7. My Learning / Insights
 
-We built PRobe at the **OpenEnv Hackathon India 2026**, organised by the [OpenEnv](https://github.com/openenv) team.
-Thanks to **Meta** and **PyTorch** for the foundational research behind GRPO and policy optimisation, **Hugging Face** for TRL, Transformers, and the infrastructure that makes running RL on LLMs accessible, **Unsloth** for 4-bit quantisation that fits training on a free T4 GPU, and **Scaler School of Technology** for hosting and mentorship throughout the hackathon.
+While exploring RL, one idea kept returning to me like a quiet truth:
+
+> **Intelligence is not only knowing—it is choosing well under uncertainty.**
+
+RL is powerful because it treats learning as *a relationship with reality*. It respects time. It respects consequences. It asks a deeper question than “What is correct?” It asks:
+
+- “What works?”
+- “What keeps working?”
+- “What leads to good outcomes over time?”
+
+And it reminded me of something philosophical: a reward is not always a “treat.” Sometimes it is clarity. Sometimes it is the absence of regret. Sometimes it is simply surviving long enough to try again.
+
+---
+
+## 8. Real-World Implementation Impact
+
+RL connects naturally with the tools we already use.
+
+### RL and AI
+- RL helps AI systems become **decision-makers**, not just predictors.
+- It’s especially relevant when the AI must act repeatedly and adapt.
+
+### RL and Machine Learning
+- Supervised learning: learn from labeled examples.
+- RL: learn from interaction and feedback.
+
+In practice, modern systems often blend them:
+
+- pre-train with supervised data
+- improve with RL-style feedback
+
+### RL and Python
+Python is a friendly home for RL because:
+
+- it has strong ML libraries
+- it’s good for experimentation
+- it’s the language many teams already know
+
+Common building blocks include:
+
+- environments/simulators
+- training loops
+- logging + evaluation
+
+### RL and SaaS products
+RL becomes very real in SaaS when your product has loops like:
+
+- recommend → user reacts → adapt
+- notify → user ignores/engages → learn timing
+- rank → user clicks → improve ranking
+
+But there’s a responsibility here:
+
+- A reward that optimizes only “engagement” can accidentally optimize addiction.
+
+So in SaaS, the true art is not just *using* RL. It is choosing **the right reward**—one aligned with user trust and long-term value.
+
+---
+
+## 9. Conclusion
+
+Reinforcement Learning is not magic. It is patience, repeated.
+
+It is the idea that learning can emerge from a simple loop:
+
+- act
+- observe
+- adjust
+
+And yet, from that loop come extraordinary things: game-playing agents, adaptive systems, robots that can learn, and personalization that feels almost human.
+
+If the future of AI is about systems that do more than answer—systems that **choose**, **act**, and **improve**—then RL will remain one of the most important ways we teach machines to live inside the world.
+
+And perhaps that is the most human lesson of all:
+
+> We learn not by being told what’s right, but by becoming the kind of being who can find it—again and again.

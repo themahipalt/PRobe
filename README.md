@@ -80,6 +80,8 @@ The training entrypoint is `training/train_grpo.py`.
 pip install -e ".[training]"
 ```
 
+**Colab:** for actual training, switch to **GPU**: Runtime → Change runtime type → Hardware accelerator → GPU. CPU training is extremely slow, and some TRL configs may error if bf16/fp16 is enabled on CPU.
+
 ### Smoke test (no GPU, no model download)
 
 ```bash
@@ -142,37 +144,61 @@ Training writes artifacts under `outputs/` (or your `--output-dir`), including:
 
 ## Before vs. after training (images)
 
-### Latest measured run (Google Colab, 100 steps)
+### Latest measured run (Google Colab, partial log captured)
 
-These numbers were captured from a Colab run summary (not from GitHub artifacts):
+These numbers were extracted from `outputs/training.jsonl` in Colab:
 
 ```
 ==================================================
-  COLAB 100-STEP FINAL RESULTS
+  COLAB 5-RECORD RUN SUMMARY (from outputs/training.jsonl)
 ==================================================
-  Total steps      : 100
-  Avg reward       : 0.395
-  Best reward      : 0.787
-  First 25 avg     : 0.407
-  Last 25 avg      : 0.418
-  Improvement      : +0.011
-  Oracle ceiling   : 0.778
-  % of oracle      : 50.7%
-
-  Random baseline  : -0.260
-  Your model avg   : 0.395
-  vs random        : +0.655
+  Total records   : 5
+  Avg reward      : 0.164
+  Best reward     : 0.250
+  First 25% avg   : 0.100
+  Last 25% avg    : 0.185
+  Improvement     : +0.085
 ```
 
 Quick scan for judges:
 
-- **Mean reward (100 steps)**: **0.395**
-- **Best reward**: **0.787**
-- **First 25% vs last 25%**: **0.407 → 0.418** (**+0.011**)
-- **vs oracle ceiling (0.778)**: **50.7%**
-- **vs random baseline (-0.260)**: **+0.655**
+- **Mean reward (logged)**: **0.164**
+- **Best reward (logged)**: **0.250**
+- **First 25% vs last 25% (logged)**: **0.100 → 0.185** (**+0.085**)
 
-> Note: If you did not download/zip outputs from Colab before the runtime ended, the plot PNGs may be gone. The numbers above are still valid if you saved them in your notebook output.
+> Note: this is **not a full 100-step summary** yet — the `training.jsonl` currently contains only 5 logged records. To report “after 100 steps”, make sure the run actually logs ~100 records (and save/zip `outputs/` before interrupting).
+
+**How to extract the “after N steps” numbers (from `training.jsonl`):** even if you interrupt training, you can compute the same judge-friendly summary from `outputs/training.jsonl` as long as it contains records.
+
+```python
+# Colab cell: summarize outputs/training.jsonl and print a README-ready block
+import json, pathlib
+
+path = pathlib.Path("outputs/training.jsonl")
+recs = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+assert recs, "training.jsonl is empty"
+
+def get_reward(r):
+    # Supports both older keys ("reward") and current key ("reward_total")
+    return float(r.get("reward_total", r.get("reward")))
+
+rewards = [get_reward(r) for r in recs]
+n = len(rewards)
+first_q = rewards[: max(1, n // 4)]
+last_q = rewards[3 * n // 4 :] if n >= 4 else rewards
+
+summary = f"""==================================================
+  COLAB {n}-RECORD RUN SUMMARY (from outputs/training.jsonl)
+==================================================
+  Total records   : {n}
+  Avg reward      : {sum(rewards)/n:.3f}
+  Best reward     : {max(rewards):.3f}
+  First 25% avg   : {sum(first_q)/len(first_q):.3f}
+  Last 25% avg    : {sum(last_q)/len(last_q):.3f}
+  Improvement     : {sum(last_q)/len(last_q) - sum(first_q)/len(first_q):+.3f}
+"""
+print(summary)
+```
 
 After training, these images are written to `outputs/` and help show improvement:
 
