@@ -71,16 +71,13 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Set PYTHONPATH so imports work correctly
 ENV PYTHONPATH="/app/env:$PYTHONPATH"
 
-# Install curl for health checks
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-
 # Run the FastAPI server
 # HF Spaces exposes port 7860; set to 8000 for local dev
 ENV PORT=7860
 
-# Health check (use PORT environment variable)
+# Health check using Python (more reliable than curl in containers)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \
-    CMD curl -f http://localhost:7860/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7860/health', timeout=3).read()" || exit 1
 
 # The module path is constructed to work with the /app/env structure
 CMD ["sh", "-c", "cd /app/env && uvicorn environment.app:app --host 0.0.0.0 --port 7860"]
