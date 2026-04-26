@@ -79,5 +79,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run the FastAPI server
-# The module path is constructed to work with the /app/env structure
-CMD ["sh", "-c", "cd /app/env && uvicorn environment.app:app --host 0.0.0.0 --port 8000"]
+# HF Spaces exposes port 7860; set to 8000 for local dev
+ENV PORT=${PORT:-7860}
+CMD ["sh", "-c", "cd /app/env && uvicorn environment.app:app --host 0.0.0.0 --port ${PORT}"]

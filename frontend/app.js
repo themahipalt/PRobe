@@ -21,8 +21,8 @@
 // ═══════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  // WebSocket URL — auto-detects host so the page works on any deployment
-  wsUrl: `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:8000/ws`,
+  // WebSocket URL — uses same origin so HF Space proxy routes correctly
+  wsUrl: `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`,
   reconnectDelayMs: 2000,
   ringCircumference: 314,  // 2π × r=50
 };
