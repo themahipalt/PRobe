@@ -21,4 +21,4 @@ uv.lock
 Thumbs.db
 
 # Training/runtime caches
-.mplconfig/
+.mplconfig/.vs/
