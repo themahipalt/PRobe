@@ -19,18 +19,17 @@ tags:
 
 ## Submission links (judge quick access)
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/FILL_COLAB_LINK)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1624TxcO3kJXLyDTyhENUH22w81Wa2XIb#scrollTo=krnbsm0fq3dH)
 
-> Replace each placeholder below with a real URL before submission.
+
 
 | Resource | URL |
 |---|---|
 | 🤗 HuggingFace Space (live environment) | https://huggingface.co/spaces/mahithakur/PRobe |
-| 📓 Training notebook (Colab / Kaggle) | [View in Colab](https://colab.research.google.com/drive/FILL_COLAB_LINK) |
-| 📝 Mini-blog / writeup (HuggingFace) | [Published on OpenEnv Hackers](https://huggingface.co/spaces/open-env/open-env-hackers) |
+| 📓 Training notebook (Colab) | [View in Colab](https://colab.research.google.com/drive/1624TxcO3kJXLyDTyhENUH22w81Wa2XIb#scrollTo=krnbsm0fq3dH) |
+| 📝 Mini-blog / writeup (HuggingFace) | [PRobe Discussion](https://huggingface.co/spaces/mahithakur/PRobe/discussions/1) |
 | 📊 Training results (Dataset) | https://huggingface.co/datasets/mahithakur/PRobe-training-results |
-| 🎥 Demo video (YouTube, < 2 min) | [Create and share](https://www.youtube.com/) |
-| 📈 JUDGE_REPORT | [View report](./reports/JUDGE_REPORT.md) |
+| 📈 Evaluation Report | [View report](./reports/JUDGE_REPORT.md) |
 
 ## TL;DR
 
