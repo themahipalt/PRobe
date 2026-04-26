@@ -192,6 +192,14 @@ def _build_app() -> FastAPI:
             pass
 
     # ── Web UI ────────────────────────────────────────────────────────────
+    # / → redirect to /ui/ (root path)
+    @application.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def root_redirect() -> HTMLResponse:
+        return HTMLResponse(
+            '<meta http-equiv="refresh" content="0;url=/ui/">',
+            status_code=200,
+        )
+
     # /web → redirect so old links still work
     @application.get("/web", response_class=HTMLResponse, include_in_schema=False)
     async def web_redirect() -> HTMLResponse:
